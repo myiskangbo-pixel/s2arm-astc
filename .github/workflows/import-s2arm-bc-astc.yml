@@ -1,0 +1,51 @@
+
+name: Import S2Arm BC ASTC port
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out project repository
+        uses: actions/checkout@v4
+
+      - name: Fetch upstream S2Arm source
+        run: git clone --depth 1 https://github.com/jhaizhou-ops/S2Arm.git /tmp/S2Arm
+
+      - name: Check and apply BC ASTC patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s s2arm-bc-astc-port-stage3.patch
+          patch --dry-run --batch -p2 -d /tmp/S2Arm < s2arm-bc-astc-port-stage3.patch
+          patch --batch -p2 -d /tmp/S2Arm < s2arm-bc-astc-port-stage3.patch
+
+      - name: Build portable texture tests
+        run: make -C /tmp/S2Arm/graphics/nvn/gfx/tex/tests t_bc_soft t_tex t_tex_layout
+
+      - name: Run portable texture tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/S2Arm/graphics/nvn/gfx/tex/tests/t_bc_soft
+          /tmp/S2Arm/graphics/nvn/gfx/tex/tests/t_tex
+          /tmp/S2Arm/graphics/nvn/gfx/tex/tests/t_tex_layout
+
+      - name: Publish patched source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --exclude='.git' /tmp/S2Arm/ "$GITHUB_WORKSPACE"/
+          rm -f s2arm-bc-astc-port-stage3.patch
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C bc-astc-import
+          git add -A
+          git commit -m "Import S2Arm with experimental BC ASTC port"
+          git push --force origin HEAD:refs/heads/bc-astc-import
