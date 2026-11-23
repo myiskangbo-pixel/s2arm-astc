@@ -1,0 +1,720 @@
+using Ryujinx.Common.Logging;
+using Ryujinx.Common.Memory;
+using Ryujinx.Common.Utilities;
+using Ryujinx.HLE.HOS.Services.Ldn.Types;
+using Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy;
+using Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Types;
+using Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.Types;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Threading;
+
+namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+{
+    internal class LanDiscovery : IDisposable
+    {
+        private const int DefaultPort = 11452;
+        private const ushort CommonChannel = 6;
+        private const byte CommonLinkLevel = 3;
+        private const byte CommonNetworkType = 2;
+
+        private const int FailureTimeout = 4000;
+
+        private readonly LdnMitmClient _parent;
+        private readonly string _lanInterfaceId;
+        private readonly LanProtocol _protocol;
+        private bool _initialized;
+        private readonly Ssid _fakeSsid;
+        private ILdnTcpSocket _tcp;
+        private LdnProxyUdpServer _udp, _udp2;
+        private readonly List<LdnProxyTcpSession> _stations = [];
+        private readonly Lock _lock = new();
+
+        private readonly AutoResetEvent _apConnected = new(false);
+
+        internal IPAddress LocalAddr { get; private set; }
+        internal IPAddress LocalBroadcastAddr { get; private set; }
+        internal NetworkInfo NetworkInfo;
+
+        public bool IsHost => _tcp is LdnProxyTcpServer;
+
+        private readonly Random _random = new();
+
+        // NOTE: Credit to https://stackoverflow.com/a/39338188
+        private static IPAddress GetBroadcastAddress(IPAddress address, IPAddress mask)
+        {
+            // IPAddress bytes are network order; BitConverter is host order. Keep the
+            // conversion explicit so every supported host computes the same address.
+            uint ipAddress = NetworkHelpers.ConvertIpv4Address(address);
+            uint ipMaskV4 = NetworkHelpers.ConvertIpv4Address(mask);
+            uint broadCastIpAddress = ipAddress | ~ipMaskV4;
+
+            return NetworkHelpers.ConvertUint(broadCastIpAddress);
+        }
+
+        private static NetworkInfo GetEmptyNetworkInfo()
+        {
+            NetworkInfo networkInfo = new()
+            {
+                NetworkId = new NetworkId
+                {
+                    SessionId = new Array16<byte>(),
+                },
+                Common = new CommonNetworkInfo
+                {
+                    MacAddress = new Array6<byte>(),
+                    Ssid = new Ssid
+                    {
+                        Name = new Array33<byte>(),
+                    },
+                },
+                Ldn = new LdnNetworkInfo
+                {
+                    NodeCountMax = LdnConst.NodeCountMax,
+                    SecurityParameter = new Array16<byte>(),
+                    Nodes = new Array8<NodeInfo>(),
+                    AdvertiseData = new Array384<byte>(),
+                    Reserved4 = new Array140<byte>(),
+                },
+            };
+
+            Span<NodeInfo> nodesSpan = networkInfo.Ldn.Nodes.AsSpan();
+
+            for (int i = 0; i < LdnConst.NodeCountMax; i++)
+            {
+                nodesSpan[i] = new NodeInfo
+                {
+                    MacAddress = new Array6<byte>(),
+                    UserName = new Array33<byte>(),
+                    Reserved2 = new Array16<byte>(),
+                };
+            }
+
+            return networkInfo;
+        }
+
+        public LanDiscovery(LdnMitmClient parent, string lanInterfaceId)
+        {
+            _parent = parent;
+            _lanInterfaceId = lanInterfaceId;
+
+            if (!RefreshLocalAddress(rebind: false))
+            {
+                throw new InvalidOperationException("No local IPv4 route is available for ldn_mitm.");
+            }
+
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"Initialize LanDiscovery using IP: {LocalAddr}, broadcast: {LocalBroadcastAddr}");
+
+            // [DIAG] 建房/入房时立刻打印一行：不依赖 Switch 接入即可判断新宿主是否在跑、选的是哪张网卡。
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"[DIAG] LanDiscovery init: ifaceId={_lanInterfaceId ?? "(null)"}, local={LocalAddr}, broadcast={LocalBroadcastAddr}");
+
+            _fakeSsid = new Ssid
+            {
+                Length = LdnConst.SsidLengthMax,
+            };
+            _random.NextBytes(_fakeSsid.Name.AsSpan()[..32]);
+
+            _protocol = new LanProtocol(this);
+            _protocol.Accept += OnAccept;
+            _protocol.StationConnected += OnStationConnected;
+            _protocol.SyncNetwork += OnSyncNetwork;
+            _protocol.DisconnectStation += DisconnectStation;
+            _protocol.ClientDisconnected += OnClientDisconnected;
+
+            NetworkInfo = GetEmptyNetworkInfo();
+
+            ResetStations();
+
+            if (!InitUdp())
+            {
+                Logger.Error?.PrintMsg(LogClass.ServiceLdn, "LanDiscovery Initialize: InitUdp failed.");
+
+                return;
+            }
+
+            _initialized = true;
+        }
+
+        private bool RefreshLocalAddress(IPAddress remoteAddress = null, bool rebind = true)
+        {
+            (_, UnicastIPAddressInformation address) =
+                NetworkHelpers.GetLocalInterfaceForTarget(_lanInterfaceId, remoteAddress);
+
+            if (address == null)
+            {
+                return false;
+            }
+
+            bool changed = !address.Address.Equals(LocalAddr);
+            LocalAddr = address.Address;
+            LocalBroadcastAddr = GetBroadcastAddress(
+                address.Address,
+                address.IPv4Mask ?? IPAddress.Parse("255.255.255.0"));
+
+            if (changed && rebind && _udp != null && !InitUdp())
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        protected void OnSyncNetwork(NetworkInfo info)
+        {
+            bool updated = false;
+            string advertiseHex;
+            string nodes;
+
+            lock (_lock)
+            {
+                if (!NetworkInfo.Equals(info))
+                {
+                    NetworkInfo = info;
+                    updated = true;
+
+                    Logger.Debug?.PrintMsg(LogClass.ServiceLdn, $"Host IP: {NetworkHelpers.ConvertUint(info.Ldn.Nodes[0].Ipv4Address)}");
+                }
+
+                advertiseHex = Convert.ToHexString(info.Ldn.AdvertiseData.AsSpan()[..info.Ldn.AdvertiseDataSize]);
+                nodes = string.Join(",", Enumerable.Range(0, LdnConst.NodeCountMax).Select(index =>
+                {
+                    NodeInfo node = info.Ldn.Nodes[index];
+                    return $"{node.NodeId}:{node.IsConnected}:{node.LocalCommunicationVersion}";
+                }));
+            }
+
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnMitm SyncNetwork advertiseSize={info.Ldn.AdvertiseDataSize}, advertise={advertiseHex}, nodes={nodes}");
+
+            if (updated)
+            {
+                _parent.InvokeNetworkChange(info, true);
+            }
+
+            _apConnected.Set();
+        }
+
+        protected void OnClientDisconnected(LdnProxyTcpClient client)
+        {
+            lock (_lock)
+            {
+                if (!ReferenceEquals(_tcp, client))
+                {
+                    return;
+                }
+            }
+
+            Logger.Warning?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnMitm client lost remote host: {client.Endpoint}");
+            _parent.InvokeNetworkChange(NetworkInfo, false, DisconnectReason.SignalLost);
+        }
+
+        protected void OnAccept(LdnProxyTcpSession station)
+        {
+            lock (_lock)
+            {
+                station.NodeId = LocateEmptyNode();
+                Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnAccept: assigned node={station.NodeId}, stationsBefore={_stations.Count}");
+
+                if (_stations.Count > LdnConst.StationCountMax || station.NodeId == -1)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnAccept REJECTED: node={station.NodeId}, stations={_stations.Count}");
+                    station.Disconnect();
+                    station.Dispose();
+
+                    return;
+                }
+
+                _stations.Add(station);
+                Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnAccept added station node={station.NodeId}, stationsAfter={_stations.Count}");
+            }
+        }
+
+        protected void OnStationConnected(LdnProxyTcpSession station)
+        {
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnStationConnected node={station.NodeId} inStations={_stations.Contains(station)}");
+            lock (_lock)
+            {
+                if (_stations.Contains(station))
+                {
+                    UpdateNodes();
+                }
+            }
+        }
+
+        public void DisconnectStation(LdnProxyTcpSession station)
+        {
+            if (!station.IsDisposed)
+            {
+                if (station.IsConnected)
+                {
+                    station.Disconnect();
+                }
+
+                station.Dispose();
+            }
+
+            lock (_lock)
+            {
+                if (_stations.Remove(station))
+                {
+                    NetworkInfo.Ldn.Nodes[station.NodeId] = new NodeInfo()
+                    {
+                        MacAddress = new Array6<byte>(),
+                        UserName = new Array33<byte>(),
+                        Reserved2 = new Array16<byte>(),
+                    };
+
+                    UpdateNodes();
+                }
+            }
+        }
+
+        public bool SetAdvertiseData(byte[] data)
+        {
+            if (data.Length > LdnConst.AdvertiseDataSizeMax)
+            {
+                Logger.Error?.PrintMsg(LogClass.ServiceLdn, "AdvertiseData exceeds size limit.");
+
+                return false;
+            }
+
+            data.CopyTo(NetworkInfo.Ldn.AdvertiseData.AsSpan());
+            NetworkInfo.Ldn.AdvertiseDataSize = (ushort)data.Length;
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnMitm SetAdvertiseData size={data.Length}, data={Convert.ToHexString(data)}");
+
+            // NOTE: Otherwise this results in SessionKeepFailed or MasterDisconnected
+            lock (_lock)
+            {
+                if (NetworkInfo.Ldn.Nodes[0].IsConnected == 1)
+                {
+                    UpdateNodes(true);
+                }
+            }
+
+            return true;
+        }
+
+        public void InitNetworkInfo()
+        {
+            lock (_lock)
+            {
+                NetworkInfo.Common.MacAddress = GetFakeMac();
+                NetworkInfo.Common.Channel = CommonChannel;
+                NetworkInfo.Common.LinkLevel = CommonLinkLevel;
+                NetworkInfo.Common.NetworkType = CommonNetworkType;
+                NetworkInfo.Common.Ssid = _fakeSsid;
+
+                NetworkInfo.Ldn.Nodes = new Array8<NodeInfo>();
+                
+                Span<NodeInfo> nodesSpan = NetworkInfo.Ldn.Nodes.AsSpan();
+
+                for (int i = 0; i < LdnConst.NodeCountMax; i++)
+                {
+                    nodesSpan[i].NodeId = (byte)i;
+                    nodesSpan[i].IsConnected = 0;
+                }
+            }
+        }
+
+        protected Array6<byte> GetFakeMac(IPAddress address = null)
+        {
+            address ??= LocalAddr;
+
+            byte[] ip = address.GetAddressBytes();
+
+            Array6<byte> macAddress = new();
+            new byte[] { 0x02, 0x00, ip[0], ip[1], ip[2], ip[3] }.CopyTo(macAddress.AsSpan());
+
+            return macAddress;
+        }
+
+        public bool InitTcp(bool listening, IPAddress address = null, int port = DefaultPort)
+        {
+            Logger.Debug?.PrintMsg(LogClass.ServiceLdn, $"LanDiscovery InitTcp: IP: {address}, listening: {listening}");
+
+            if (_tcp != null)
+            {
+                _tcp.DisconnectAndStop();
+                _tcp.Dispose();
+                _tcp = null;
+            }
+
+            ILdnTcpSocket tcpSocket;
+
+            if (listening)
+            {
+                try
+                {
+                    address ??= LocalAddr;
+
+                    tcpSocket = new LdnProxyTcpServer(_protocol, address, port);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"Failed to create LdnProxyTcpServer: {ex}");
+
+                    return false;
+                }
+
+                if (!tcpSocket.Start())
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                if (address == null)
+                {
+                    return false;
+                }
+
+                try
+                {
+                    tcpSocket = new LdnProxyTcpClient(_protocol, address, port, LocalAddr);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"Failed to create LdnProxyTcpClient: {ex}");
+
+                    return false;
+                }
+            }
+
+            _tcp = tcpSocket;
+
+            return true;
+        }
+
+        public bool InitUdp()
+        {
+            _udp?.Stop();
+            _udp2?.Stop();
+
+            try
+            {
+                // NOTE: Linux won't receive any broadcast packets if the socket is not bound to the broadcast address.
+                //       Windows only works if bound to localhost or the local address.
+                //       See this discussion: https://stackoverflow.com/questions/13666789/receiving-udp-broadcast-packets-on-linux
+                if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || (OperatingSystem.IsIOS() || OperatingSystem.IsTvOS()))   // 平台例外：tvOS 与 iOS 走同一分支
+                {
+                    _udp2 = new LdnProxyUdpServer(_protocol, LocalBroadcastAddr, DefaultPort, subscribeToProtocol: false);
+                }
+
+                _udp = new LdnProxyUdpServer(_protocol, LocalAddr, DefaultPort);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"Failed to create LdnProxyUdpServer: {ex}");
+
+                return false;
+            }
+
+            return true;
+        }
+
+        public NetworkInfo[] Scan(ushort channel, ScanFilter filter)
+        {
+            // Re-evaluate before every discovery pass so unplugging Ethernet and moving to Wi-Fi
+            // takes effect without asking the player to choose an interface.
+            if (_tcp == null && !RefreshLocalAddress())
+            {
+                return [];
+            }
+
+            if (_udp == null)
+            {
+                return [];
+            }
+
+            _udp.ClearScanResults();
+
+            if (_protocol.SendBroadcast(_udp, LanPacketType.Scan, DefaultPort) < 0)
+            {
+                return [];
+            }
+
+            List<NetworkInfo> outNetworkInfo = [];
+
+            foreach (KeyValuePair<ulong, NetworkInfo> item in _udp.GetScanResults())
+            {
+                bool copy = true;
+
+                if (filter.Flag.HasFlag(ScanFilterFlag.LocalCommunicationId))
+                {
+                    copy &= filter.NetworkId.IntentId.LocalCommunicationId == item.Value.NetworkId.IntentId.LocalCommunicationId;
+                }
+
+                if (filter.Flag.HasFlag(ScanFilterFlag.SessionId))
+                {
+                    copy &= filter.NetworkId.SessionId.AsSpan().SequenceEqual(item.Value.NetworkId.SessionId.AsSpan());
+                }
+
+                if (filter.Flag.HasFlag(ScanFilterFlag.NetworkType))
+                {
+                    copy &= filter.NetworkType == (NetworkType)item.Value.Common.NetworkType;
+                }
+
+                if (filter.Flag.HasFlag(ScanFilterFlag.Ssid))
+                {
+                    Span<byte> gameSsid = item.Value.Common.Ssid.Name.AsSpan()[item.Value.Common.Ssid.Length..];
+                    Span<byte> scanSsid = filter.Ssid.Name.AsSpan()[filter.Ssid.Length..];
+                    copy &= gameSsid.SequenceEqual(scanSsid);
+                }
+
+                if (filter.Flag.HasFlag(ScanFilterFlag.SceneId))
+                {
+                    copy &= filter.NetworkId.IntentId.SceneId == item.Value.NetworkId.IntentId.SceneId;
+                }
+
+                if (copy)
+                {
+                    if (item.Value.Ldn.Nodes[0].UserName[0] != 0)
+                    {
+                        outNetworkInfo.Add(item.Value);
+                    }
+                    else
+                    {
+                        Logger.Warning?.PrintMsg(LogClass.ServiceLdn, "LanDiscovery Scan: Got empty Username. There might be a timing issue somewhere...");
+                    }
+                }
+            }
+
+            return outNetworkInfo.ToArray();
+        }
+
+        protected void ResetStations()
+        {
+            lock (_lock)
+            {
+                foreach (LdnProxyTcpSession station in _stations)
+                {
+                    station.Disconnect();
+                    station.Dispose();
+                }
+
+                _stations.Clear();
+            }
+        }
+
+        private int LocateEmptyNode()
+        {
+            Span<NodeInfo> nodesSpan = NetworkInfo.Ldn.Nodes.AsSpan();
+
+            for (int i = 1; i < nodesSpan.Length; i++)
+            {
+                if (nodesSpan[i].IsConnected == 0)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        protected void UpdateNodes(bool forceUpdate = false)
+        {
+            int countConnected = 1;
+
+            foreach (LdnProxyTcpSession station in _stations)
+            {
+                station.OverrideInfo();
+
+                if (station.NodeInfo.IsConnected == 1)
+                {
+                    countConnected++;
+
+                    // NOTE: This is not part of the original implementation.
+                    NetworkInfo.Ldn.Nodes[station.NodeId] = station.NodeInfo;
+                }
+            }
+
+            byte nodeCount = (byte)countConnected;
+
+            bool networkInfoChanged = forceUpdate || NetworkInfo.Ldn.NodeCount != nodeCount;
+
+            NetworkInfo.Ldn.NodeCount = nodeCount;
+
+            foreach (LdnProxyTcpSession station in _stations)
+            {
+                if (station.NodeInfo.IsConnected == 1)
+                {
+                    if (_protocol.SendPacket(station, LanPacketType.SyncNetwork, SpanHelpers.AsSpan<NetworkInfo, byte>(ref NetworkInfo).ToArray()) < 0)
+                    {
+                        Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"Failed to send {LanPacketType.SyncNetwork} to station {station.NodeId}");
+                    }
+                }
+            }
+
+            if (networkInfoChanged)
+            {
+                _parent.InvokeNetworkChange(NetworkInfo, true);
+            }
+        }
+
+        protected NodeInfo GetNodeInfo(NodeInfo node, UserConfig userConfig, ushort localCommunicationVersion)
+        {
+            uint ipAddress = NetworkHelpers.ConvertIpv4Address(LocalAddr);
+
+            node.MacAddress = GetFakeMac();
+            node.IsConnected = 1;
+            node.UserName = userConfig.UserName;
+            node.LocalCommunicationVersion = localCommunicationVersion;
+            node.Ipv4Address = ipAddress;
+
+            return node;
+        }
+
+        public bool CreateNetwork(SecurityConfig securityConfig, UserConfig userConfig, NetworkConfig networkConfig)
+        {
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnMitm CreateNetwork localCommunicationVersion={networkConfig.LocalCommunicationVersion}");
+
+            if (!RefreshLocalAddress() || !InitTcp(true))
+            {
+                return false;
+            }
+
+            InitNetworkInfo();
+
+            NetworkInfo.Ldn.NodeCountMax = networkConfig.NodeCountMax;
+            NetworkInfo.Ldn.SecurityMode = (ushort)securityConfig.SecurityMode;
+
+            NetworkInfo.Common.Channel = networkConfig.Channel == 0 ? (ushort)6 : networkConfig.Channel;
+
+            NetworkInfo.NetworkId.SessionId = new Array16<byte>();
+            _random.NextBytes(NetworkInfo.NetworkId.SessionId.AsSpan());
+            NetworkInfo.NetworkId.IntentId = networkConfig.IntentId;
+
+            NetworkInfo.Ldn.Nodes[0] = GetNodeInfo(NetworkInfo.Ldn.Nodes[0], userConfig, networkConfig.LocalCommunicationVersion);
+            NetworkInfo.Ldn.Nodes[0].IsConnected = 1;
+            NetworkInfo.Ldn.NodeCount++;
+
+            _parent.InvokeNetworkChange(NetworkInfo, true);
+
+            return true;
+        }
+
+        public void DestroyNetwork()
+        {
+            if (_tcp != null)
+            {
+                try
+                {
+                    _tcp.DisconnectAndStop();
+                }
+                finally
+                {
+                    _tcp.Dispose();
+                    _tcp = null;
+                }
+            }
+
+            ResetStations();
+        }
+
+        public NetworkError Connect(NetworkInfo networkInfo, UserConfig userConfig, uint localCommunicationVersion)
+        {
+            _apConnected.Reset();
+
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnMitm Connect localCommunicationVersion={localCommunicationVersion}, " +
+                $"hostLocalCommunicationVersion={networkInfo.Ldn.Nodes[0].LocalCommunicationVersion}");
+
+            if (networkInfo.Ldn.NodeCount == 0)
+            {
+                return NetworkError.Unknown;
+            }
+
+            IPAddress address = NetworkHelpers.ConvertUint(networkInfo.Ldn.Nodes[0].Ipv4Address);
+
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"Connecting to host: {address}");
+
+            if (!RefreshLocalAddress(address) || !InitTcp(false, address))
+            {
+                Logger.Error?.PrintMsg(LogClass.ServiceLdn, "Could not initialize TCPClient");
+
+                return NetworkError.ConnectNotFound;
+            }
+
+            if (!_tcp.Connect())
+            {
+                Logger.Error?.PrintMsg(LogClass.ServiceLdn, "Failed to connect.");
+
+                return NetworkError.ConnectFailure;
+            }
+
+            NodeInfo myNode = GetNodeInfo(new NodeInfo(), userConfig, (ushort)localCommunicationVersion);
+            if (_protocol.SendPacket(_tcp, LanPacketType.Connect, SpanHelpers.AsSpan<NodeInfo, byte>(ref myNode).ToArray()) < 0)
+            {
+                return NetworkError.Unknown;
+            }
+
+            return _apConnected.WaitOne(FailureTimeout) ? NetworkError.None : NetworkError.ConnectTimeout;
+        }
+
+        public void Dispose()
+        {
+            if (_initialized)
+            {
+                DisconnectAndStop();
+                ResetStations();
+                _initialized = false;
+            }
+
+            _protocol.Accept -= OnAccept;
+            _protocol.StationConnected -= OnStationConnected;
+            _protocol.SyncNetwork -= OnSyncNetwork;
+            _protocol.DisconnectStation -= DisconnectStation;
+            _protocol.ClientDisconnected -= OnClientDisconnected;
+        }
+
+        public void DisconnectAndStop()
+        {
+            if (_udp != null)
+            {
+                try
+                {
+                    _udp.Stop();
+                }
+                finally
+                {
+                    _udp.Dispose();
+                    _udp = null;
+                }
+            }
+
+            if (_udp2 != null)
+            {
+                try
+                {
+                    _udp2.Stop();
+                }
+                finally
+                {
+                    _udp2.Dispose();
+                    _udp2 = null;
+                }
+            }
+
+            if (_tcp != null)
+            {
+                try
+                {
+                    _tcp.DisconnectAndStop();
+                }
+                finally
+                {
+                    _tcp.Dispose();
+                    _tcp = null;
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,92 @@
+name: S2ArmInputLab
+options:
+  deploymentTarget:
+    iOS: "18.0"
+targets:
+  S2ArmInputLab:
+    type: application
+    platform: iOS
+    sources:
+      - ios/lab/Lab.m
+      - ios/vpad.m
+      - ios/play_layout.m
+      - ios/play_reflection.m
+      - ios/vpad_layout.m
+      - ios/vpad_settings.m
+      - ios/vpad_cheats.m
+      - ios/vpad_mods.m   # 资源 Mod 页（设置页组 11）
+      - ios/cheats_parse.m
+      - ios/game_options.m   # 单款补丁 / 金手指选项与崩溃询问（diag.m 调）
+      - ios/app_settings.m
+      - ios/cpatch_settings.m
+      - ios/cpatch_model.m
+      - ios/sgrade_style.m   # S 级优化金色样式（s2a_sgrade_gold / header / image；设置页、齿轮菜单、金手指页都用）
+      - ios/sgrade_line.m   # S 级状态句（设置页满屏 / 帧率行）
+      - ios/l10n   # 宿主界面字符串表（<语言>.lproj/S2ArmHost.strings，ios/s2a_l10n.h S2AL，#316）
+      - ios/settings.m
+      - ios/controller.m
+      - ios/keyboard.m            # iPad 外接键盘（#1869）：GCKeyboard 采键，controller.m 照 Mac 选源
+      - ios/keyboard_settings.m   # 外接键盘改键页（齿轮菜单第一层）
+      - ios/keyboard_store.m      # 键位两层存取（本款 / 所有游戏的默认，#1987）
+      - ios/player_assign.m      # 分配玩家（齿轮菜单第一层，#1606 ④）
+      - ios/mouse.m               # 触控板 / 鼠标（#1869 PR 2）：GCMouse 采键与位移、指针锁定
+      - ios/input_config.m        # 键位：起局点名的 S2A_INPUT_CONFIG（keyboard.m 读）
+      - runtime/src/input_config.c   # schema 1 解析与共用缺省键位
+      - ios/slot_feedback.m
+      - ios/ea_rumble.m
+      - ios/phone_motion.m
+      - ios/diag.m
+      - ios/diagzip.m
+      - ios/diagredact.m
+      - ios/diagcollect.m
+      - runtime/src/pad.c
+      - runtime/src/caps.c
+      - runtime/src/motion_pick.c
+      - runtime/src/sesdiag.c
+      - runtime/src/patch.c
+      - runtime/src/launchctx.c
+      - runtime/src/phone_axes.c
+      - runtime/src/phone_rumble_mailbox.c
+    dependencies:
+      - sdk: UIKit.framework
+      - sdk: GameController.framework
+      - sdk: CoreMotion.framework
+      - sdk: CoreHaptics.framework
+      - sdk: ExternalAccessory.framework
+      - sdk: UniformTypeIdentifiers.framework
+      - sdk: MetricKit.framework
+      - sdk: CoreTelephony.framework
+      - sdk: Metal.framework
+      - sdk: libz.tbd
+    info:
+      path: build/f01-lab/Info.plist
+      properties:
+        CFBundleDisplayName: F01 Input Lab
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight, UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight, UIInterfaceOrientationPortrait]
+        UIRequiresFullScreen: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: InputLab
+                UISceneDelegateClassName: S2AInputLabScene
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: local.s2arm.inputlab
+      TARGETED_DEVICE_FAMILY: "1,2"
+      CODE_SIGN_STYLE: Automatic
+      INFOPLIST_FILE: "$(SRCROOT)/Info.plist"
+      ENABLE_DEBUG_DYLIB: NO
+      CLANG_ENABLE_OBJC_ARC: YES
+      GCC_PREPROCESSOR_DEFINITIONS: ["$(inherited)", S2A_INPUT_LAB=1]
+      HEADER_SEARCH_PATHS:
+        - "$(SRCROOT)/../../runtime/include"
+        - "$(SRCROOT)/../../runtime/src"
+        - "$(SRCROOT)/../../ios"
+        - "$(SRCROOT)/../../runtime/ns2pro/include"
+      OTHER_LDFLAGS: ["$(inherited)", "$(S2A_LAB_WEAK)"]   # 放行参数由 build.sh 按源码「弱链接[lab]」登记生成后传入（tools/weak_link_decl.py flags lab）

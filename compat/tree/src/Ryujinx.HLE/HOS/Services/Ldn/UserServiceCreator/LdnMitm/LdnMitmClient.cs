@@ -1,0 +1,105 @@
+using Ryujinx.Common.Logging;
+using Ryujinx.Common.Utilities;
+using Ryujinx.HLE.HOS.Services.Ldn.Types;
+using Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.Types;
+using System;
+using System.Net;
+
+namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+{
+    /// <summary>
+    /// Client implementation for <a href="https://github.com/spacemeowx2/ldn_mitm">ldn_mitm</a>
+    /// </summary>
+    internal class LdnMitmClient : INetworkClient
+    {
+        public ProxyConfig Config { get; }
+        public bool NeedsRealId => false;
+
+        public event EventHandler<NetworkChangeEventArgs> NetworkChange;
+
+        private readonly LanDiscovery _lanDiscovery;
+
+        public LdnMitmClient(HleConfiguration config)
+        {
+            _lanDiscovery = new LanDiscovery(this, config.MultiplayerLanInterfaceId);
+        }
+
+        internal IPAddress LocalAddress => _lanDiscovery.LocalAddr;
+
+        internal void InvokeNetworkChange(NetworkInfo info, bool connected, DisconnectReason reason = DisconnectReason.None)
+        {
+            NetworkChange?.Invoke(this, new NetworkChangeEventArgs(info, connected: connected, disconnectReason: reason));
+        }
+
+        public NetworkError Connect(ConnectRequest request)
+        {
+            return _lanDiscovery.Connect(request.NetworkInfo, request.UserConfig, request.LocalCommunicationVersion);
+        }
+
+        public NetworkError ConnectPrivate(ConnectPrivateRequest request)
+        {
+            // NOTE: This method is not implemented in ldn_mitm
+            Logger.Stub?.PrintMsg(LogClass.ServiceLdn, "LdnMitmClient ConnectPrivate");
+
+            return NetworkError.None;
+        }
+
+        public bool CreateNetwork(CreateAccessPointRequest request, byte[] advertiseData)
+        {
+            return _lanDiscovery.CreateNetwork(request.SecurityConfig, request.UserConfig, request.NetworkConfig);
+        }
+
+        public bool CreateNetworkPrivate(CreateAccessPointPrivateRequest request, byte[] advertiseData)
+        {
+            // NOTE: This method is not implemented in ldn_mitm
+            Logger.Stub?.PrintMsg(LogClass.ServiceLdn, "LdnMitmClient CreateNetworkPrivate");
+
+            return true;
+        }
+
+        public void DisconnectAndStop()
+        {
+            _lanDiscovery.DisconnectAndStop();
+        }
+
+        public void DisconnectNetwork()
+        {
+            _lanDiscovery.DestroyNetwork();
+        }
+
+        public ResultCode Reject(DisconnectReason disconnectReason, uint nodeId)
+        {
+            // NOTE: This method is not implemented in ldn_mitm
+            Logger.Stub?.PrintMsg(LogClass.ServiceLdn, "LdnMitmClient Reject");
+
+            return ResultCode.Success;
+        }
+
+        public NetworkInfo[] Scan(ushort channel, ScanFilter scanFilter)
+        {
+            return _lanDiscovery.Scan(channel, scanFilter);
+        }
+
+        public void SetAdvertiseData(byte[] data)
+        {
+            _lanDiscovery.SetAdvertiseData(data);
+        }
+
+        public void SetGameVersion(ReadOnlySpan<byte> versionString)
+        {
+            string version = System.Text.Encoding.UTF8.GetString(versionString).TrimEnd('\0');
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"LdnMitmClient SetGameVersion: {version}");
+        }
+
+        public void SetStationAcceptPolicy(AcceptPolicy acceptPolicy)
+        {
+            // NOTE: This method is not implemented in ldn_mitm
+            Logger.Stub?.PrintMsg(LogClass.ServiceLdn, "LdnMitmClient SetStationAcceptPolicy");
+        }
+
+        public void Dispose()
+        {
+            _lanDiscovery.Dispose();
+        }
+    }
+}

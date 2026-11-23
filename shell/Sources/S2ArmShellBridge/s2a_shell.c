@@ -1,0 +1,67 @@
+// Play 回调的登记与转发（见 include/s2a_shell.h）。只在主线程用，不加锁。
+#include "s2a_shell.h"
+#include <stdio.h>
+
+static s2a_shell_play_fn g_play;
+static void *g_play_ctx;
+
+void s2a_shell_set_play_handler(s2a_shell_play_fn fn, void *ctx) {
+    g_play = fn;
+    g_play_ctx = fn ? ctx : NULL;
+}
+
+int s2a_shell_play(const char *game_id) {
+    const char *id = game_id ? game_id : "";
+    if (!g_play) {
+        fprintf(stderr, "S2Arm 游戏库：Play %s（没登记处理函数，只记日志）\n", id);
+        return 0;
+    }
+    g_play(id, g_play_ctx);
+    return 1;
+}
+
+// 虚拟手柄布局：宿主（ios/vpad_shell.m）有强定义时用它；本包单独编（swift test）时用这里的缺省
+__attribute__((weak)) char *s2a_shell_vpad_layout_json(const char *game_id, double safe_w, double safe_h, int split) { (void)game_id; (void)safe_w; (void)safe_h; (void)split; return NULL; }
+__attribute__((weak)) int s2a_shell_vpad_save(const char *game_id, const char *centers_json, double safe_w, double safe_h, int split) { (void)game_id; (void)centers_json; (void)safe_w; (void)safe_h; (void)split; return 0; }
+__attribute__((weak)) int s2a_shell_vpad_select(const char *game_id, const char *layout_id, int split) { (void)game_id; (void)layout_id; (void)split; return 0; }
+__attribute__((weak)) char *s2a_shell_vpad_preview(const char *game_id, void *view, int split) { (void)game_id; (void)view; (void)split; return NULL; }
+__attribute__((weak)) int s2a_shell_vpad_set_hold_lock(const char *game_id, int enabled) { (void)game_id; (void)enabled; return 0; }
+__attribute__((weak)) char *s2a_shell_game_options_json(const char *game_id) { (void)game_id; return NULL; }
+__attribute__((weak)) int s2a_shell_game_option_set(const char *game_id, const char *kind, const char *key, int on) { (void)game_id; (void)kind; (void)key; (void)on; return 0; }
+
+static s2a_shell_refresh_fn g_refresh;
+static void *g_refresh_ctx;
+void s2a_shell_set_refresh_handler(s2a_shell_refresh_fn fn, void *ctx) { g_refresh = fn; g_refresh_ctx = fn ? ctx : NULL; }
+void s2a_shell_refresh(void) { if (g_refresh) g_refresh(g_refresh_ctx); }
+
+// 本款资源包：宿主（ios/app.m）有强定义时用它；本包单独编时按就绪、点了只记日志
+__attribute__((weak)) int s2a_shell_game_install_state(const char *game_id) { (void)game_id; return 1; }
+__attribute__((weak)) int s2a_shell_game_needs_host_update(const char *game_id) { (void)game_id; return 0; }
+__attribute__((weak)) int s2a_shell_scan_game_source(const char *dir, const char *source_id, const char *skip) { (void)dir; (void)source_id; (void)skip; return -1; }
+__attribute__((weak)) int s2a_shell_forget_game_source(const char *source_id) { (void)source_id; return 0; }
+__attribute__((weak)) int s2a_shell_game_sign_state(const char *game_id) { (void)game_id; return 0; }
+__attribute__((weak)) int s2a_shell_install_game(const char *game_id) { (void)game_id; return 0; }
+__attribute__((weak)) int s2a_shell_install_progress(const char *game_id, int *done, int *total) { (void)game_id; (void)done; (void)total; return 0; }
+__attribute__((weak)) int s2a_shell_install_wait(void) { return 0; }
+__attribute__((weak)) void s2a_shell_library_appeared(void) {}
+__attribute__((weak)) int s2a_shell_install_phase(const char *game_id, int *phase, double *fraction) { (void)game_id; (void)phase; (void)fraction; return 0; }
+__attribute__((weak)) const char *s2a_shell_install_failure(const char *game_id) { (void)game_id; return NULL; }
+__attribute__((weak)) int s2a_shell_take_open_settings(void) { return 0; }
+__attribute__((weak)) char *s2a_shell_iml_notice(void) { return NULL; }
+__attribute__((weak)) void s2a_shell_iml_notice_seen(void) {}
+__attribute__((weak)) void s2a_shell_pick_game_data(const char *game_id) { fprintf(stderr, "S2Arm 游戏库：要导入 %s 的游戏数据（宿主没接说明页，只记日志）\n", game_id ? game_id : ""); }
+
+// iCloud 存档同步：宿主（ios/save_transfer.m）有强定义时用它；本包单独编时不同步
+__attribute__((weak)) char *s2a_shell_save_context(void) { return NULL; }
+__attribute__((weak)) void s2a_shell_report_problem(void) {}
+__attribute__((weak)) const char *s2a_shell_cert_status(void) { return ""; }
+__attribute__((weak)) void s2a_shell_cert_p12(void) {}
+__attribute__((weak)) void s2a_shell_cert_sidestore(void) {}
+__attribute__((weak)) void s2a_shell_cert_get(void) {}
+__attribute__((weak)) void s2a_shell_pick_s2arm(const char *game_id) { (void)game_id; }
+__attribute__((weak)) void s2a_shell_export_game(const char *game_id) { (void)game_id; }
+__attribute__((weak)) int s2a_shell_snapshot_available(const char *game_id) { (void)game_id; return 0; }
+__attribute__((weak)) void s2a_shell_restore_snapshot(const char *game_id) { (void)game_id; }
+__attribute__((weak)) int s2a_shell_snapshot_dir(const char *game_id, char *out, unsigned long size) { (void)game_id; (void)out; (void)size; return -1; }
+__attribute__((weak)) int s2a_shell_delete_snapshot(const char *game_id) { (void)game_id; return -1; }
+__attribute__((weak)) char *s2a_shell_save_request(const char *json) { (void)json; return NULL; }

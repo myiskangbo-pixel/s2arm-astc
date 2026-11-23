@@ -1,0 +1,751 @@
+import Foundation
+import Testing
+import S2ArmShellBridge
+@testable import ShellUI
+@testable import S2ArmShellHost
+
+// 期望值按 Fixtures/catalogue.json 手算：8 条里重复的 Alpha 丢弃 → 7 条；状态按字段逐条对位
+@Test func catalogueFixture() throws {
+    let url = try #require(Bundle.module.url(forResource: "catalogue", withExtension: "json", subdirectory: "Fixtures"))
+    let c = Catalogue.load(path: url.path)
+    #expect(c.tiles.map(\.id) == ["0100000000010000", "0100000000020000", "0100000000030000", "0100000000040000",
+                                  "0100000000050000", "bad", "0100000000060000"])
+    #expect(c.tiles[0].title == "Alpha" && c.tiles[0].subtitle == "1.2.0" && c.tiles[0].banner == nil)
+    #expect(c.tiles[0].state == .playable)
+    #expect(c.tiles[1].state == .needsGameData)
+    #expect(c.tiles[2].state == .needsAppUpdate)
+    #expect(c.tiles[3].state == .broken(reason: "R", detail: "D"))
+    // technical 一行按 App 语言取 ShellUI 文字表（#316）：中文系统是原句，其余是英文原文（期望两种都手写）
+    #expect([GameState.broken(reason: "", detail: "", technical: "未知状态 \"flying\""), .broken(reason: "", detail: "", technical: "Unknown state \"flying\"")].contains(c.tiles[4].state))
+    if case .broken = c.tiles[5].state {} else { Issue.record("非法 title_id 应显示为不可用") }
+    #expect(c.tiles[6].state == .playable)   // 缺 state 按可运行
+    #expect(c.problems.count == 2)           // 重复 1 + 非法 id 1
+}
+
+// 封面金色 S（v0.4.0）：多款容器 Games/<游戏号>/cpatch.tsv 有表头以外的条目才亮；只有表头 / 没有表不亮；单款 App 读根目录的表。期望手写
+@Test func catalogueSGradeBadge() throws {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: base) }
+    for (id, text) in [("0100000000010000", "编号\nwsauto:a:w\n"), ("0100000000020000", "编号\n")] {
+        let d = base.appendingPathComponent("Games").appendingPathComponent(id)
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        try text.write(to: d.appendingPathComponent("cpatch.tsv"), atomically: true, encoding: .utf8)
+    }
+    let json = #"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B"},{"title_id":"0100000000030000","name":"C"}]}"#
+    #expect(Catalogue.parse(Data(json.utf8), baseDirectory: base).tiles.map(\.sgrade) == [true, false, false])
+    // 只带随包金手指原文（补丁表只有表头）：也算打进了（11-14，同 Mac）
+    try "[x]\n04000000 0 1\n".write(to: base.appendingPathComponent("Games/0100000000020000/cheat-src.AABBCCDD00112233.txt"), atomically: true, encoding: .utf8)
+    #expect(Catalogue.parse(Data(json.utf8), baseDirectory: base).tiles.map(\.sgrade) == [true, true, false])
+    try "编号\nfps:x\n".write(to: base.appendingPathComponent("cpatch.tsv"), atomically: true, encoding: .utf8)
+    #expect(Catalogue.parse(Data(#"{"schema":1,"games":[{"title_id":"0100000000030000","name":"C"}]}"#.utf8), baseDirectory: base).tiles.map(\.sgrade) == [true])
+}
+
+@Test func catalogueBadInputs() {
+    let base = URL(fileURLWithPath: "/")
+    #expect(Catalogue.parse(Data("not json".utf8), baseDirectory: base).tiles.isEmpty)
+    #expect(Catalogue.parse(Data(#"{"schema":2,"games":[]}"#.utf8), baseDirectory: base).problems.count == 1)
+    #expect(Catalogue.load(path: "/nonexistent/s2a.json").problems.count == 1)
+}
+
+/// 宿主没接的功能必须是 nil：界面据此不显示按钮。接上一项，就把它从这张表挪走，入口自动出现。
+@MainActor @Test func unwiredActionsStayNilSoTheirButtonsAreHidden() throws {
+    let data = Data(#"{"games":[]}"#.utf8)
+    let a = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/"))).actions
+    #expect(a.onUseAppData == nil && a.onPickCloudSaves == nil && a.onDisableCloudSaves == nil && a.onUseShellCloud == nil)
+    #expect(a.onResetDefaults == nil && a.onShowLog == nil && a.onAppUpdate == nil)
+    #expect(a.onPickShellData == nil && a.onClearShellData == nil && a.onPickShellCloud == nil && a.onClearShellCloud == nil)
+    #expect(a.onGlobalPadMapChange == nil && a.onGlobalPadMapReset == nil)
+}
+
+// 删除游戏（#227 iPad 点了没反应：宿主从没给 onDeleteGame 实现）：不勾存档 → 数据根下只留 S2A/（存档），勾了 → 整个删；删完库里不再显示。期望按目录手写
+@MainActor @Test func deleteGameRemovesDataAndKeepsSavesUnlessAsked() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("s2a-del-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (a, b) = ("0100000000010000", "0100000000020000")
+    for id in [a, b] {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("\(id)/资源包"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("\(id)/S2A/ryujinx/bis/user/save"), withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: root.appendingPathComponent("\(id)/identity.json"))
+    }
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")),
+                                    installState: { FileManager.default.fileExists(atPath: root.appendingPathComponent("\($0)/资源包").path) ? 1 : 0 }, gamesRoot: root)
+    #expect(model.games.map(\.id) == [a, b])
+    let delete = try #require(model.actions.onDeleteGame)
+    delete(a, false)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent(a).path) == ["S2A"])
+    delete(b, true)
+    #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(b).path))
+    #expect(model.games.isEmpty)
+}
+
+// v0.3.0 资源包挪出 Documents：游戏根是 <家>/Documents/games 时资源包在 <家>/Library/Application Support/S2Arm/games/<游戏号>/资源包（同宿主 s2a_pack_root）。
+//   只在新位置的别处电脑款照样认出；还没迁的老位置照样认；删除（不留存档）把新位置的资源包一起挪走、存档留在 Documents。期望按目录手写
+@MainActor @Test func packInLibraryIsFoundAndDeleted() throws {
+    let fm = FileManager.default, home = fm.temporaryDirectory.appendingPathComponent("s2a-home-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: home) }
+    let games = home.appendingPathComponent("Documents/games"), packs = home.appendingPathComponent("Library/Application Support/S2Arm/games")
+    let derived = S2ArmShellHostModel.packGamesRoot(for: games, home: home)?.standardizedFileURL.path
+    #expect(derived == packs.standardizedFileURL.path)
+    #expect(S2ArmShellHostModel.packGamesRoot(for: home.appendingPathComponent("x"), home: home) == nil)
+    let (a, newStray, oldStray) = ("0100000000010000", "0100000000060000", "0100000000070000")
+    let placed: [(URL, String)] = [(packs, a), (packs, newStray), (games, oldStray)]
+    for item in placed {
+        let pack = item.0.appendingPathComponent(item.1).appendingPathComponent("资源包")
+        try fm.createDirectory(at: pack, withIntermediateDirectories: true)
+        try Data("sha".utf8).write(to: pack.appendingPathComponent(".applied"))
+    }
+    try fm.createDirectory(at: games.appendingPathComponent("\(a)/S2A/ryujinx/bis/user/save"), withIntermediateDirectories: true)
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), installState: { _ in 1 }, gamesRoot: games, packGamesRoot: packs)
+    #expect(model.games.map(\.id) == [a, newStray, oldStray])
+    let oldDir: String = S2ArmShellHostModel.packDir(oldStray, games: games, packs: packs).path
+    let newDir: String = S2ArmShellHostModel.packDir(a, games: games, packs: packs).path
+    #expect(oldDir == games.appendingPathComponent(oldStray).appendingPathComponent("资源包").path)
+    #expect(newDir == packs.appendingPathComponent(a).appendingPathComponent("资源包").path)
+    let delete = try #require(model.actions.onDeleteGame)
+    delete(a, false)
+    #expect(!fm.fileExists(atPath: packs.appendingPathComponent(a).path))
+    #expect(try fm.contentsOfDirectory(atPath: games.appendingPathComponent(a).path) == ["S2A"])
+}
+
+// v0.2.6「点删除没反应」：删除不在主线程同步做，点下当场离开列表、提示「正在删除」，后台删完提示释放了多少；挪不动提示原因、游戏留着；
+//   上次删到一半留下的 .deleting 下次打开时清掉。释放量期望手算：资源包 10 个 8192 字节 + 1 个 16384 字节文件 = 98304（APFS 按 4096 对齐，正好整块）
+@MainActor @Test func deleteGameIsInstantThenReportsFreedSpace() async throws {
+    let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent("s2a-del2-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    let id = "0100000000010000", pack = root.appendingPathComponent("\(id)/资源包")
+    try fm.createDirectory(at: pack.appendingPathComponent("romfs"), withIntermediateDirectories: true)
+    try fm.createDirectory(at: root.appendingPathComponent("\(id)/S2A"), withIntermediateDirectories: true)
+    for i in 0..<10 { try Data(count: 8192).write(to: pack.appendingPathComponent("romfs/\(i).bin")) }
+    try Data(count: 16384).write(to: pack.appendingPathComponent("main"))
+    try fm.createDirectory(at: root.appendingPathComponent(".deleting/old"), withIntermediateDirectories: true)   // 上次没删完的
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")),
+                                    installState: { fm.fileExists(atPath: root.appendingPathComponent("\($0)/资源包").path) ? 1 : 0 }, gamesRoot: root)
+    model.actions.onDeleteGame?(id, false)
+    #expect(model.games.isEmpty)                                    // 当场离开列表
+    #expect(model.deleteNotice?.phase == .deleting)
+    #expect(try fm.contentsOfDirectory(atPath: root.appendingPathComponent(id).path) == ["S2A"])
+    for _ in 0..<200 where model.deleteNotice?.phase == .deleting { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(model.deleteNotice == .init(gameID: id, title: "A", phase: .done(freed: 98304)))
+    for _ in 0..<200 where !((try? fm.contentsOfDirectory(atPath: root.appendingPathComponent(".deleting").path)) ?? []).isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(try fm.contentsOfDirectory(atPath: root.appendingPathComponent(".deleting").path).isEmpty)   // 这次的和上次留下的都删光
+}
+@MainActor @Test func deleteGameThatCannotMoveSaysWhyAndStays() throws {
+    let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent("s2a-del3-\(UUID().uuidString)")
+    let id = "0100000000010000"
+    try fm.createDirectory(at: root.appendingPathComponent("\(id)/资源包"), withIntermediateDirectories: true)
+    try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)       // 游戏根不可写：待删目录建不出来
+    defer { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path); try? fm.removeItem(at: root) }
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")),
+                                    installState: { fm.fileExists(atPath: root.appendingPathComponent("\($0)/资源包").path) ? 1 : 0 }, gamesRoot: root)
+    model.actions.onDeleteGame?(id, true)
+    guard case .failed(let why)? = model.deleteNotice?.phase else { Issue.record("应提示失败：\(String(describing: model.deleteNotice))"); return }
+    #expect(!why.isEmpty)
+    #expect(model.games.map(\.id) == [id])                         // 没删成就还在列表里
+}
+
+@MainActor @Test func playOnlyForPlayable() {
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B","state":"needs_game_data"}]}"#.utf8)
+    var played: [String] = []
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { played.append($0) })
+    model.actions.onPlay("0100000000010000")
+    model.actions.onPlay("0100000000020000")
+    model.actions.onPlay("FFFFFFFFFFFFFFFF")
+    #expect(played == ["0100000000010000"])
+}
+
+// 资源包不在机上（11-07 Duo「游戏没能启动」）：清单写 playable 也显示需要游戏数据、Play 不放行而是要导入说明；放好后重判 → 可运行、放行。
+//   清单本来写 needs_game_data 的款不因资源包在就变可运行（以清单为底）
+@MainActor @Test func gameDataMissingBlocksPlay() {
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B","state":"needs_game_data"}]}"#.utf8)
+    var ready: Set<String> = ["0100000000020000"]
+    var played: [String] = [], picked: [String] = []
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { played.append($0) },
+                                    installState: { ready.contains($0) ? 1 : 0 }, pickGameData: { picked.append($0) })
+    // 审计 P1-155：资源没到位、玩家也没删过的款留在库里，显示「需要游戏数据」，点进去看说明
+    #expect(model.games.map(\.id) == ["0100000000010000", "0100000000020000"] && model.games.map(\.game.state) == [.needsGameData, .needsGameData])
+    model.actions.onPlay("0100000000010000")
+    #expect(played.isEmpty && picked == ["0100000000010000"])
+    model.actions.onPickGameData("0100000000010000")
+    #expect(picked == ["0100000000010000", "0100000000010000"])
+    ready.insert("0100000000010000"); model.refreshGameData()
+    #expect(model.games.map(\.id) == ["0100000000010000", "0100000000020000"] && model.games.map(\.game.state) == [.playable, .needsGameData])   // 再推一款，刷新后多一款
+    model.actions.onPlay("0100000000010000")
+    #expect(played == ["0100000000010000"])
+    ready.remove("0100000000010000")              // 库开着时资源包被拿走：Play 当场重判、不放行
+    model.actions.onPlay("0100000000010000")
+    #expect(played == ["0100000000010000"] && picked.count == 3)
+    #expect(model.games.map(\.game.state) == [.needsGameData, .needsGameData])   // 资源被拿走（不是玩家删的）：留在库里、回到「需要游戏数据」
+}
+
+// 审计 P1-155：玩家在这台设备上删掉的款，资源不在时不再显示（删除名单 .s2a-removed.txt 跨重开有效）；电脑重新装过来、资源回来就又显示
+@MainActor @Test func deletedGameStaysHiddenUntilItsDataReturns() async throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("s2a-removed-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    let (a, b) = ("0100000000010000", "0100000000020000")
+    try fm.createDirectory(at: root.appendingPathComponent("\(a)/资源包"), withIntermediateDirectories: true)
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B"}]}"#.utf8)
+    let state: (String) -> Int32 = { fm.fileExists(atPath: root.appendingPathComponent("\($0)/资源包").path) ? 1 : 0 }
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { _ in },
+                                    installState: state, gamesRoot: root)
+    #expect(model.games.map(\.id) == [a, b] && model.games.map(\.game.state) == [.playable, .needsGameData])
+    model.deleteGame(a, saves: true)
+    #expect(model.games.map(\.id) == [b])                          // 删掉的当场离开列表，没删的 B 照旧在
+    let again = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { _ in },
+                                    installState: state, gamesRoot: root)
+    #expect(again.games.map(\.id) == [b])                          // 重开 App 仍不显示
+    try fm.createDirectory(at: root.appendingPathComponent("\(a)/资源包"), withIntermediateDirectories: true)
+    again.refreshGameData()
+    #expect(again.games.map(\.id) == [a, b])                       // 电脑重新装过来：又显示
+    let third = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { _ in },
+                                    installState: { $0 == a ? 0 : 0 }, gamesRoot: root)
+    #expect(third.games.map(\.id) == [a, b])                       // 已从删除名单摘掉：资源再不在也显示「需要游戏数据」
+}
+
+// 宿主「重新检查」→ s2a_shell_refresh → 登记的处理函数
+nonisolated(unsafe) private var refreshed = 0
+@Test func cBridgeRefresh() {
+    s2a_shell_set_refresh_handler(nil, nil); s2a_shell_refresh(); #expect(refreshed == 0)
+    s2a_shell_set_refresh_handler({ _ in refreshed += 1 }, nil); s2a_shell_refresh(); #expect(refreshed == 1)
+    s2a_shell_set_refresh_handler(nil, nil)
+    #expect(s2a_shell_game_install_state("0100000000010000") == 1)   // 不链宿主时弱定义缺省：按就绪
+    var d: Int32 = 0, t: Int32 = 0
+    #expect(s2a_shell_install_game("0100000000010000") == 0 && s2a_shell_install_progress("0100000000010000", &d, &t) == 0)   // 不链宿主：不解、没进度
+}
+
+// C 出口：没登记 → 0；登记后 → 1 且处理函数拿到同一个 id
+nonisolated(unsafe) private var lastPlayed = ""
+@Test func cBridgeForwards() {
+    s2a_shell_set_play_handler(nil, nil)
+    #expect(s2a_shell_play("0100000000010000") == 0)
+    s2a_shell_set_play_handler({ id, _ in lastPlayed = String(cString: id!) }, nil)
+    #expect(s2a_shell_play("0100000000020000") == 1)
+    #expect(lastPlayed == "0100000000020000")
+    s2a_shell_set_play_handler(nil, nil)
+}
+
+// 每款游戏的设置行（S2ArmGameSettings，11-07 维护者；11-13 画面 / 社区补丁 / 金手指改由宿主给）：临时偏好 + 宿主桩，期望值手算
+@MainActor @Test func gameSettingsRows() throws {
+    let tag = UUID().uuidString
+    let app = try #require(UserDefaults(suiteName: "s2a.test.app." + tag))
+    var games: [String: UserDefaults] = [:]
+    // 宿主桩：G1 有一条社区补丁、两条金手指（一条写死地址）；G2 没有补丁和金手指、满屏改不动；G3 宿主读不到
+    typealias O = S2ArmGameSettings.Options
+    var opts: [String: O] = [
+        "G1": O(fps: .init(on: true, note: "fps note"), fullscreen: .init(on: false, note: "fs note"),
+                patches: [.init(id: "wsauto:1", title: "Adaptive", note: "Widescreen · verified", on: false)],
+                cheats: [.init(id: "a.txt/Coins", title: "Coins", note: "fixed", on: false), .init(id: "a.txt/Jump", title: "Jump", on: true)]),
+        "G2": O(fps: .init(on: false), fullscreen: .init(on: false, enabled: false, note: "blocked")),
+        "G4": O(fps: .init(on: false, hidden: true), fullscreen: .init(on: false, hidden: true)),   // 没有帧率 / 宽屏补丁（11-13 只用补丁）：两行都不出
+        // 帧率补丁带 60 / 120 两档（11-13）：帧率开关下多一行档位；宿主记的档不在列表里按「自动」显示
+        "G5": O(fps: .init(on: true, levels: [.init(value: "0", label: "Auto"), .init(value: "60", label: "60 fps"), .init(value: "120", label: "120 fps")], pick: "120", levelsTitle: "Level"), fullscreen: .init(on: false, hidden: true)),
+        "G6": O(fps: .init(on: true, levels: [.init(value: "0", label: "Auto"), .init(value: "60", label: "60 fps")], pick: "90"), fullscreen: .init(on: false, hidden: true)),
+    ]
+    var sets: [String] = []
+    let stores = S2ArmGameSettings.Stores(game: { id in
+        if let d = games[id] { return d }
+        let d = UserDefaults(suiteName: "s2a.test.game.\(tag).\(id)"); games[id] = d; return d }, app: app,
+        options: { opts[$0] },
+        setOption: { id, kind, key, on in sets.append("\(id) \(kind) \(key) \(on)"); return true })
+    defer { app.removePersistentDomain(forName: "s2a.test.app." + tag); for (id, _) in games { UserDefaults().removePersistentDomain(forName: "s2a.test.game.\(tag).\(id)") } }
+    func row(_ s: [SettingSection], _ id: String) -> SettingRow? { s.flatMap(\.rows).first { $0.id == id } }
+    // G1：分组顺序 显示 → 画面 → 社区补丁 → 金手指 → 虚拟手柄；值与说明照宿主给的
+    var s = S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(s.map(\.id) == ["s2a.identity", "s2a.picture", "s2a.patches", "s2a.cheats", "s2a.vpad"])
+    #expect(row(s, "fps60")?.value == "on" && row(s, "fps60")?.note == "fps note" && row(s, "fullscreen")?.value == "off" && row(s, "fullscreen")?.enabled == true)
+    #expect(row(s, "patch.wsauto:1")?.value == "off" && row(s, "cheat.a.txt/Coins")?.note == "fixed" && row(s, "cheat.a.txt/Jump")?.value == "on")
+    #expect(row(s, "vpadOpacity")?.value == "100" && row(s, "vpadHoldLock")?.value == "on")
+    #expect(row(s, "splitScreen")?.value == "auto" && row(s, "screenOrientation")?.value == "auto")
+    S2ArmGameSettings.apply(id: "G1", setting: "splitScreen", value: "on", stores: stores)
+    S2ArmGameSettings.apply(id: "G1", setting: "screenOrientation", value: "portrait", stores: stores)
+    let sharedScreen = S2ArmGameSettings.sections(for: "G2", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(sharedScreen, "splitScreen")?.value == "on" && row(sharedScreen, "screenOrientation")?.value == "portrait")
+    S2ArmGameSettings.apply(id: "G1", setting: "splitScreen", value: "invalid", stores: stores)
+    #expect(app.string(forKey: "splitScreen") == "on")
+    #expect(row(S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false, holdLock: false)), "vpadHoldLock")?.value == "off")
+    if case .choice(let o) = row(s, "vpadLayout")?.kind { #expect(o.map(\.id) == ["default", "edit"]) } else { Issue.record("布局行应是多选") }
+    // G2：没有补丁和金手指就不出那两组；满屏改不动 = 行置灰
+    let s2 = S2ArmGameSettings.sections(for: "G2", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(s2.map(\.id) == ["s2a.identity", "s2a.picture", "s2a.vpad"] && row(s2, "fullscreen")?.enabled == false)
+    // G3：宿主读不到 = 画面组只有所有游戏共用的分屏 / 朝向，不出 60 帧 / 满屏（不拿猜的缺省冒充实际状态）
+    let s3 = S2ArmGameSettings.sections(for: "G3", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(s3.map(\.id) == ["s2a.identity", "s2a.picture", "s2a.vpad"] && row(s3, "fps60") == nil && row(s3, "fullscreen") == nil && row(s3, "splitScreen") != nil)
+    // G4：宿主标了 hidden = 这款没有对应补丁，画面组只剩共用的分屏 / 朝向
+    let s4 = S2ArmGameSettings.sections(for: "G4", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(s4, "fps60") == nil && row(s4, "fullscreen") == nil && row(s4, "splitScreen") != nil)
+    #expect(S2ArmGameSettings.Options.parse(#"{"fps":{"on":false,"hidden":true},"fullscreen":{"on":false}}"#)?.fps.hidden == true)
+    // G5：档位行在帧率开关后、值是宿主记的档、选项照宿主给的；G1（没给档位）不出这行；G6 两项（自动 + 一档）也出、记的档不在列表按自动
+    let s5 = S2ArmGameSettings.sections(for: "G5", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(s5.first { $0.id == "s2a.picture" }?.rows.map(\.id).suffix(2) == ["fps60", "fpsPick"] && row(s5, "fpsPick")?.value == "120" && row(s5, "fpsPick")?.label == "Level")
+    if case .choice(let o) = row(s5, "fpsPick")?.kind { #expect(o.map(\.id) == ["0", "60", "120"]) } else { Issue.record("档位行应是多选") }
+    #expect(row(S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false)), "fpsPick") == nil)
+    #expect(row(S2ArmGameSettings.sections(for: "G6", stores: stores, state: .init(selected: "default", hasMine: false)), "fpsPick")?.value == "0")
+    let pj = S2ArmGameSettings.Options.parse(#"{"fps":{"on":true,"levels":[{"value":"0","label":"A"},{"value":"120","label":"B"}],"pick":"120","levelsTitle":"T"},"fullscreen":{"on":false}}"#)?.fps
+    #expect(pj?.levels.map(\.value) == ["0", "120"] && pj?.pick == "120" && pj?.levelsTitle == "T")
+    // 改：四类都原样交宿主（种类、编号、开关），不返回「打开编辑页」
+    #expect(!S2ArmGameSettings.apply(id: "G1", setting: "fps60", value: "off", stores: stores))
+    S2ArmGameSettings.apply(id: "G1", setting: "fullscreen", value: "on", stores: stores)
+    S2ArmGameSettings.apply(id: "G1", setting: "patch.wsauto:1", value: "on", stores: stores)
+    S2ArmGameSettings.apply(id: "G1", setting: "cheat.a.txt/Coins", value: "on", stores: stores)
+    S2ArmGameSettings.apply(id: "G5", setting: "fpsPick", value: "60", stores: stores)
+    #expect(sets == ["G1 fps  false", "G1 fullscreen  true", "G1 patch wsauto:1 true", "G1 cheat a.txt/Coins true", "G5 fpspick 60 true"])
+    // 透明度全局：40 → 0.4，钳在 10–100：给 5 存成 0.1
+    S2ArmGameSettings.apply(id: "G1", setting: "vpadOpacity", value: "40.0", stores: stores)
+    #expect(abs((app.object(forKey: "S2AVPadOpacity") as? Double ?? 0) - 0.4) < 1e-9)
+    s = S2ArmGameSettings.sections(for: "G2", stores: stores, state: .init(selected: "mine", hasMine: true))
+    #expect(row(s, "vpadOpacity")?.value == "40" && row(s, "vpadLayout")?.value == "mine")
+    S2ArmGameSettings.apply(id: "G1", setting: "vpadOpacity", value: "5", stores: stores)
+    #expect(abs((app.object(forKey: "S2AVPadOpacity") as? Double ?? 0) - 0.1) < 1e-9)
+    // 宿主 JSON 解析：缺字段按关 / 可改 / 空说明
+    let parsed = S2ArmGameSettings.Options.parse(#"{"fps":{"on":true},"fullscreen":{"on":false,"enabled":false,"note":"x"},"patches":[{"id":"p","title":"T","on":true}],"cheats":[{"key":"f/n","name":"N","note":"fixed","on":false}]}"#)
+    #expect(parsed == O(fps: .init(on: true), fullscreen: .init(on: false, enabled: false, note: "x"),
+                        patches: [.init(id: "p", title: "T", on: true)], cheats: [.init(id: "f/n", title: "N", note: "fixed", on: false)]))
+    // 选「调整位置…」= 打开编辑页，不存值
+    #expect(S2ArmGameSettings.apply(id: "G1", setting: "vpadLayout", value: "edit", stores: stores))
+    _ = opts
+}
+
+// 输出设备类型 + 两个虚拟环绕开关（#189 后续，5.1 虚拟环绕第二片）：宿主按游戏给的 audio 块出三行，值 / 置灰照宿主给的
+//   （两个开关只在对应设备类型下可用；拨过的值照显示——切换类型各自恢复）；改动经宿主 setOption（audiodevice / audiovs）。
+//   期望值手算
+@MainActor @Test func gameAudioDeviceRows() throws {
+    let tag = UUID().uuidString
+    let app = try #require(UserDefaults(suiteName: "s2a.test.app." + tag))
+    var games: [String: UserDefaults] = [:]
+    typealias O = S2ArmGameSettings.Options
+    // 宿主桩：G1 没选设备类型（auto）、两个开关没拨过（按关显示、置灰）；G2 选了耳机、拨过耳机开关（开）、扬声器开关也拨过（开，置灰）；
+    //   G3 选了内置扬声器、拨过扬声器开关（开）；G4 选了外接、两个开关虽拨过开也不可用；G5 宿主没给 audio 块（老宿主）→ 不出三行
+    var opts: [String: O] = [
+        "G1": O(fps: .init(on: false), fullscreen: .init(on: false), audio: .init(device: "auto", vsSpeakers: false, vsHeadphones: false)),
+        "G2": O(fps: .init(on: false), fullscreen: .init(on: false), audio: .init(device: "headphones", vsSpeakers: true, vsHeadphones: true)),
+        "G3": O(fps: .init(on: false), fullscreen: .init(on: false), audio: .init(device: "builtin", vsSpeakers: true, vsHeadphones: false)),
+        "G4": O(fps: .init(on: false), fullscreen: .init(on: false), audio: .init(device: "external", vsSpeakers: true, vsHeadphones: true)),
+    ]
+    var sets: [String] = []
+    let stores = S2ArmGameSettings.Stores(game: { id in
+        if let d = games[id] { return d }
+        let d = UserDefaults(suiteName: "s2a.test.game.\(tag).\(id)"); games[id] = d; return d }, app: app,
+        options: { opts[$0] },
+        setOption: { id, kind, key, on in sets.append("\(id) \(kind) \(key) \(on)"); return true })
+    defer { app.removePersistentDomain(forName: "s2a.test.app." + tag); for (id, _) in games { UserDefaults().removePersistentDomain(forName: "s2a.test.game.\(tag).\(id)") } }
+    func row(_ s: [SettingSection], _ id: String) -> SettingRow? { s.flatMap(\.rows).first { $0.id == id } }
+    // G1：auto = 没选，两个开关置灰、按关显示；设备类型四选一，声音组三行照这个顺序
+    let s1 = S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(s1.first { $0.id == "s2a.sound" }?.rows.map(\.id) == [S2ArmGameSettings.audioDevice, S2ArmGameSettings.vsSpeakers, S2ArmGameSettings.vsHeadphones])
+    #expect(row(s1, "audioDevice")?.value == "auto" && row(s1, "vsSpeakers")?.value == "off" && row(s1, "vsSpeakers")?.enabled == false && row(s1, "vsHeadphones")?.enabled == false)
+    if case .choice(let o) = row(s1, "audioDevice")?.kind { #expect(o.map(\.id) == ["auto", "builtin", "headphones", "external"]) } else { Issue.record("设备类型行应是多选") }
+    // G2：耳机开关可用（开）、扬声器开关置灰但拨过的值照显示（切换类型各自恢复）；G3 反过来
+    let s2 = S2ArmGameSettings.sections(for: "G2", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(s2, "vsHeadphones")?.enabled == true && row(s2, "vsHeadphones")?.value == "on" && row(s2, "vsSpeakers")?.enabled == false && row(s2, "vsSpeakers")?.value == "on")
+    let s3 = S2ArmGameSettings.sections(for: "G3", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(s3, "vsSpeakers")?.enabled == true && row(s3, "vsSpeakers")?.value == "on" && row(s3, "vsHeadphones")?.enabled == false && row(s3, "vsHeadphones")?.value == "off")
+    // G4：external = 两个开关都置灰（≥6 声道直通、<6 普通下混、不用虚拟环绕），拨过的值照显示
+    let s4 = S2ArmGameSettings.sections(for: "G4", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(s4, "vsSpeakers")?.enabled == false && row(s4, "vsHeadphones")?.enabled == false && row(s4, "vsSpeakers")?.value == "on")
+    // G5：宿主没给 audio 块（老宿主）→ 三行都不出、不出声音组
+    let s5 = S2ArmGameSettings.sections(for: "G5", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(s5, "audioDevice") == nil && row(s5, "vsSpeakers") == nil && row(s5, "vsHeadphones") == nil && !s5.map(\.id).contains("s2a.sound"))
+    // 宿主 JSON 解析：device 不认识按 auto、开关缺字段按关
+    let parsed = S2ArmGameSettings.Options.parse(#"{"fps":{"on":false},"fullscreen":{"on":false},"audio":{"device":"bogus","vsSpeakers":true}}"#)
+    #expect(parsed?.audio == .init(device: "auto", vsSpeakers: true, vsHeadphones: false))
+    // 改：设备类型与两个开关都原样交宿主（类型给值、开关给 speakers / headphones + 开关值）
+    S2ArmGameSettings.apply(id: "G3", setting: "audioDevice", value: "external", stores: stores)
+    S2ArmGameSettings.apply(id: "G3", setting: "vsSpeakers", value: "off", stores: stores)
+    S2ArmGameSettings.apply(id: "G2", setting: "vsHeadphones", value: "on", stores: stores)
+    #expect(sets == ["G3 audiodevice external true", "G3 audiovs speakers false", "G2 audiovs headphones true"])
+}
+
+// 这台 iPhone 上的名字和封面：叠在清单上、可恢复默认，不影响别的款。期望值手写
+@MainActor @Test func gameIdentityOverridesCatalogue() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let json = #"{"schema":1,"games":[{"title_id":"0100000000000001","name":"原名一"},{"title_id":"0100000000000002","name":"原名二"}]}"#
+    let catalogue = Catalogue.parse(Data(json.utf8), baseDirectory: root)
+    let store = GameIdentityStore(root: root)
+    let model = S2ArmShellHostModel(catalogue: catalogue, installState: { _ in 1 }, pickGameData: { _ in }, identityStore: store)
+    let a = "0100000000000001", b = "0100000000000002"
+    #expect(model.games.map(\.game.title) == ["原名一", "原名二"] && !model.hasCustomIdentity(a))
+    model.change(a, S2ArmGameSettings.identity, S2ArmGameSettings.editIdentity)
+    #expect(model.editingIdentity == a)
+    model.saveIdentity(a, name: "  我的游戏  ", cover: nil)
+    #expect(model.editingIdentity == nil && model.games[0].game.title == "我的游戏" && model.games[1].game.title == "原名二")
+    #expect(store.load(a)?.name == "我的游戏" && store.load(b) == nil)
+    // 下次启动：从磁盘读回
+    let again = S2ArmShellHostModel(catalogue: catalogue, installState: { _ in 1 }, pickGameData: { _ in }, identityStore: store)
+    #expect(again.games[0].game.title == "我的游戏")
+    // 名字没改：不算自定义
+    model.saveIdentity(b, name: "原名二", cover: nil)
+    #expect(store.load(b) == nil && !model.hasCustomIdentity(b))
+    model.resetIdentity(a)
+    #expect(model.games[0].game.title == "原名一" && store.load(a) == nil)
+}
+
+// 名字和封面一次提交（审计 P2-221）：提交点失败时两样都不变、编辑页不关并给原因；存成后旧封面才删。期望值手写
+@MainActor @Test func gameIdentitySaveIsAllOrNothing() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let json = #"{"schema":1,"games":[{"title_id":"0100000000000001","name":"原名一"}]}"#
+    let catalogue = Catalogue.parse(Data(json.utf8), baseDirectory: root)
+    let store = GameIdentityStore(root: root)
+    let a = "0100000000000001"
+    let folder = root.appendingPathComponent("games/\(a)", isDirectory: true)
+    func covers() -> [String] { ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasPrefix("identity-cover") }.sorted() }
+
+    // 早先版本留下的固定名封面照样认；换新封面后它被删、只剩一份
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try Data([1, 2, 3]).write(to: folder.appendingPathComponent("identity-cover.jpg"))
+    #expect(store.load(a)?.cover?.lastPathComponent == "identity-cover.jpg")
+    try store.save(a, name: "名一", cover: Data([4, 5]))
+    #expect(covers().count == 1 && covers() != ["identity-cover.jpg"])
+    #expect(store.load(a)?.name == "名一" && store.load(a)?.cover.flatMap { try? Data(contentsOf: $0) } == Data([4, 5]))
+    // 只改名字：封面沿用
+    try store.save(a, name: "名二", cover: nil)
+    #expect(store.load(a)?.name == "名二" && store.load(a)?.cover.flatMap { try? Data(contentsOf: $0) } == Data([4, 5]) && covers().count == 1)
+
+    // 提交点失败：identity.json 的位置被一个非空目录占着，原子替换必然失败
+    try FileManager.default.removeItem(at: folder)
+    try FileManager.default.createDirectory(at: folder.appendingPathComponent("identity.json/x", isDirectory: true), withIntermediateDirectories: true)
+    let model = S2ArmShellHostModel(catalogue: catalogue, installState: { _ in 1 }, pickGameData: { _ in }, identityStore: store)
+    model.change(a, S2ArmGameSettings.identity, S2ArmGameSettings.editIdentity)
+    model.saveIdentity(a, name: "新名", cover: Data([9]))
+    #expect(model.editingIdentity == a, "没存成：编辑页不关")
+    #expect(model.identityError?.isEmpty == false, "给编辑页显示原因")
+    #expect(covers().isEmpty, "新封面没留下半套")
+    #expect(store.load(a) == nil && model.games[0].game.title == "原名一", "名字也没变")
+    // 负对照：挡路的东西挪走后同样的保存成功、关页、清掉原因
+    try FileManager.default.removeItem(at: folder.appendingPathComponent("identity.json"))
+    model.saveIdentity(a, name: "新名", cover: Data([9]))
+    #expect(model.editingIdentity == nil && model.identityError == nil && model.games[0].game.title == "新名" && covers().count == 1)
+    model.resetIdentity(a)
+    #expect(covers().isEmpty && store.load(a) == nil)
+}
+
+// 两端混装：手机上有、清单里没有的款（另一台电脑装的）显示成不可玩并提示回原来那台电脑重装，不给 Play。
+//   只认 16 位游戏号目录 + 资源包/.applied；没解开的、别的名字跳过。名字取资源包 ctl/control.nacp（期望按手写的 NACP 字节）
+@MainActor @Test func gamesFromAnotherComputerShowAsReinstall() throws {
+    let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent("s2a-stray-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    let (a, c, d) = ("0100000000010000", "0100000000030000", "0100000000040000")
+    for id in [a, c, d, "notes", "0100000000050000x"] {
+        try fm.createDirectory(at: root.appendingPathComponent("\(id)/资源包/ctl"), withIntermediateDirectories: true)
+    }
+    for id in [a, c, "notes"] { try Data("sha".utf8).write(to: root.appendingPathComponent("\(id)/资源包/.applied")) }
+    var nacp = Data(count: 0x4000)
+    nacp.replaceSubrange(0 ..< 5, with: Data("Gamma".utf8))
+    nacp.replaceSubrange(14 * 0x300 ..< 14 * 0x300 + 9, with: Data("丙游戏".utf8))
+    try nacp.write(to: root.appendingPathComponent("\(c)/资源包/ctl/control.nacp"))
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    var played: [String] = []
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { played.append($0) },
+                                    installState: { _ in 1 }, gamesRoot: root)
+    #expect(model.games.map(\.id) == [a, c])
+    let stray = try #require(model.games.last?.game)
+    #expect(["丙游戏", "Gamma"].contains(stray.title))
+    #expect([GameState.broken(reason: "需要在原来那台电脑上重装", detail: "这款是在另一台电脑上装的，存档和游戏资源都还在这台 iPhone 上；到那台电脑上再点一次「装到 iPhone」就能回来。"),
+             .broken(reason: "Reinstall from the original computer", detail: "This game was installed from another computer. Its saves and game data are still on this iPhone; in S2Arm on that computer, click “Export…” for this game, tick this iPhone and start to bring it back.")].contains(stray.state))
+    model.actions.onPlay(c)
+    #expect(played.isEmpty)
+}
+
+// 装机蒙版（v0.2.3）：传着按电脑写的传输清单画进度、久不动报传输中断；传完后台解开、画解包进度；没解成点重试；装好了可玩。
+//   期望按手写夹具算：清单 total 300，romfs.img 要 200 已到 120、第 0 包要 100 已到 30 → 150/300 = 0.5
+@MainActor @Test func arrivingGameShowsProgressThenBecomesPlayable() throws {
+    let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent("s2a-arrive-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    let id = "0100000000010000", pack = root.appendingPathComponent("\(id)/资源包")
+    try fm.createDirectory(at: pack.appendingPathComponent(".incoming"), withIntermediateDirectories: true)
+    try Data(#"{"schema":1,"total":300,"started":1,"files":[["romfs.img",200],[".incoming/1_000.tar",100],["../escape",50]]}"#.utf8).write(to: pack.appendingPathComponent(".transfer"))
+    try Data(count: 120).write(to: pack.appendingPathComponent("romfs.img"))
+    try Data(count: 30).write(to: pack.appendingPathComponent(".incoming/1_000.tar"))
+    var stage: Int32 = 3, clock = Date(), installs: [String] = [], progress: (Int, Int)? = nil, played: [String] = []
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { played.append($0) },
+                                    installState: { _ in stage }, installGame: { installs.append($0); return true }, installProgress: { _ in progress },
+                                    now: { clock }, gamesRoot: root)
+    #expect(model.games.first?.game.state == .installing(InstallStage(.transferring, fraction: 0.5)))
+    model.actions.onPlay(id); #expect(played.isEmpty)                                    // 传着不给开始
+    clock = clock.addingTimeInterval(S2ArmShellHostModel.transferStall + 5); model.refreshGameData()
+    #expect(model.games.first?.game.state.installPhase == .interrupted)                  // 文件都没动过了 90 秒 → 传断了
+    try Data(count: 200).write(to: pack.appendingPathComponent("romfs.img")); try Data(count: 100).write(to: pack.appendingPathComponent(".incoming/1_000.tar"))
+    clock = Date(); model.refreshGameData()
+    #expect(model.games.first?.game.state == .installing(InstallStage(.transferring, fraction: 1)))   // 重新插上续传：接着涨
+    stage = 2; model.refreshGameData()
+    #expect(installs == [id] && model.games.first?.game.state == .installing(InstallStage(.installing, fraction: 0)))   // 传完：起后台解开
+    progress = (3, 4); model.refreshGameData()
+    #expect(installs == [id] && model.games.first?.game.state == .installing(InstallStage(.installing, fraction: 0.75)))   // 不重复起
+    progress = nil; model.refreshGameData()
+    #expect(model.games.first?.game.state.installPhase == .failed && installs == [id])   // 宿主说不在解了、还是阶段 2 → 没解成，不自动再解
+    model.actions.onPlay(id)
+    #expect(installs == [id, id] && played.isEmpty)                                      // 点重试：再解一次
+    stage = 1; model.refreshGameData()
+    #expect(model.games.first?.game.state == .playable)
+    model.actions.onPlay(id); #expect(played == [id])
+    // 续传：电脑写的 base = 已在手机上的 600 字节，这次 total 300 已到 150 → (600 + 150) / 900
+    try Data(#"{"schema":1,"total":300,"base":600,"files":[["romfs.img",200],[".incoming/1_000.tar",100]]}"#.utf8).write(to: pack.appendingPathComponent(".transfer"))
+    try Data(count: 120).write(to: pack.appendingPathComponent("romfs.img")); try Data(count: 30).write(to: pack.appendingPathComponent(".incoming/1_000.tar"))
+    stage = 3; clock = Date(); model.refreshGameData()
+    #expect(model.games.first?.game.state == .installing(InstallStage(.transferring, fraction: 750.0 / 900)))
+}
+
+// iOS 装机剃刀 #41：没有传输清单（老电脑端推的）也要能判传断了。夹具：资源包里只有一个没写完的包，宿主报阶段 3。
+//   期望按时钟手写：刚改过 → 传输中；过了 transferStall + 5 秒没动 → 传输中断（原先永远「传输中」）；包又长了、时钟回到现在 → 又是传输中
+@MainActor @Test func transferWithoutListStillDetectsStall() throws {
+    let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent("s2a-nolist-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    let id = "0100000000010000", pack = root.appendingPathComponent("\(id)/资源包")
+    try fm.createDirectory(at: pack.appendingPathComponent(".incoming"), withIntermediateDirectories: true)
+    try Data(count: 30).write(to: pack.appendingPathComponent(".incoming/1_000.tar"))
+    var clock = Date()
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), installState: { _ in 3 },
+                                    now: { clock }, gamesRoot: root)
+    #expect(model.games.first?.game.state.installPhase == .transferring)
+    clock = clock.addingTimeInterval(S2ArmShellHostModel.transferStall + 5); model.refreshGameData()
+    #expect(model.games.first?.game.state.installPhase == .interrupted)
+    try Data(count: 60).write(to: pack.appendingPathComponent(".incoming/1_000.tar"))
+    clock = Date(); model.refreshGameData()
+    #expect(model.games.first?.game.state.installPhase == .transferring)
+}
+
+// 正在解别的款（宿主拒绝起第二个）：这款排着，卡片说在等什么（iOS 装机剃刀 #46 / #47：宿主答 1 另一款在解 → 第 4 步「等另一款装完」，
+//   2 在整理游戏目录 → 第 5 步；原先一律只写「安装中」），不算没解成，下一次刷新再试
+@MainActor @Test func secondUnpackWaitsItsTurn() {
+    var accept = false, installs = 0, wait: Int32 = 1
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")),
+                                    installState: { _ in 2 }, installGame: { _ in installs += 1; return accept }, installProgress: { _ in nil },
+                                    installWait: { wait })
+    #expect(model.games.first?.game.state == .installing(InstallStage(.installing, step: 4)) && installs == 1)
+    wait = 2; model.refreshGameData()
+    #expect(model.games.first?.game.state == .installing(InstallStage(.installing, step: 5)) && installs == 2)
+    wait = 0; model.refreshGameData()
+    #expect(model.games.first?.game.state == .installing(InstallStage(.installing)) && installs == 3)
+    accept = true; model.refreshGameData()
+    #expect(model.games.first?.game.state == .installing(InstallStage(.installing, fraction: 0)) && installs == 4)
+}
+
+// 开着库时电脑才开始推（真机实测：库里一直看不到这款）：每秒重判，它一开始传就出现；全都能玩了也不停——
+//   已装好的款被重推 / 装更新（#399 真机验收：原先停了，整个推送过程一直显示可玩）下一秒就画上蒙版
+@MainActor @Test func libraryKeepsWatchingForGamesThatStartArriving() {
+    var stage: Int32 = 0
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), installState: { _ in stage },
+                                    gamesRoot: URL(fileURLWithPath: "/nonexistent"))
+    #expect(model.games.map(\.game.state) == [.needsGameData] && model.watching)   // 审计 P1-155：还没推过来也留在库里，显示「需要游戏数据」
+    stage = 3; model.refreshGameData()
+    #expect(model.games.first?.game.state.installPhase == .transferring && model.watching)
+    stage = 1; model.refreshGameData()
+    #expect(model.games.first?.game.state == .playable && model.watching)
+    stage = 3; model.refreshGameData()   // 已能玩的款又开始传：计时器还在，下一次重判就是「传输中」
+    #expect(model.games.first?.game.state.installPhase == .transferring && model.watching)
+}
+
+// 装好后第一次点开之前名字前亮蓝点（同 iOS 新装 App）：期望按文件时间手写——.applied 比 .played 新 = 新装；点开始写 .played → 灭；
+//   再装一版（.applied 更新）→ 又亮；升级前就玩过的款（有存档目录 S2A/、没有 .played）不亮
+@MainActor @Test func newlyInstalledGameShowsBlueDotUntilFirstPlay() throws {
+    let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent("s2a-new-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    let (a, b) = ("0100000000010000", "0100000000020000")
+    for id in [a, b] { try fm.createDirectory(at: root.appendingPathComponent("\(id)/资源包"), withIntermediateDirectories: true); try Data("x".utf8).write(to: root.appendingPathComponent("\(id)/资源包/.applied")) }
+    try fm.createDirectory(at: root.appendingPathComponent("\(b)/S2A"), withIntermediateDirectories: true)
+    var played: [String] = []
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { played.append($0) },
+                                    installState: { _ in 1 }, gamesRoot: root)
+    #expect(model.games.map(\.game.isNew) == [true, false])
+    model.actions.onPlay(a)
+    #expect(played == [a] && model.games.map(\.game.isNew) == [false, false])
+    model.refreshGameData(); #expect(model.games.first?.game.isNew == false)
+    try fm.setAttributes([.modificationDate: Date().addingTimeInterval(60)], ofItemAtPath: root.appendingPathComponent("\(a)/资源包/.applied").path)
+    model.refreshGameData(); #expect(model.games.first?.game.isNew == true)   // 再装一版
+}
+
+
+// 单一 IMG 的「安装中」蒙版（v0.3.0）：解开时宿主报阶段 1 / 2 / 3 与这一段比例，卡片写正在做哪一步、圈按这一段画；
+//   解完仍是阶段 2（没解成）→「安装没完成」，说明里带宿主给的那句原因。期望按 ShellUI 文案手写（英文界面）
+@MainActor @Test func imgInstallShowsStepAndFailureReason() {
+    var phase: (Int, Double?)? = (2, 0.37), installs = 0
+    let why = "Unpacking small files from game.img (unknown format, please update S2Arm)"
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")),
+                                    installState: { _ in 2 }, installGame: { _ in installs += 1; return true }, installProgress: { _ in nil },
+                                    installPhase: { _ in phase }, installFailure: { _ in why }, gamesRoot: URL(fileURLWithPath: "/nonexistent"))
+    #expect(model.games.first?.game.state == .installing(InstallStage(.installing, fraction: 0.37, step: 2)))
+    #expect(["Unpacking small files… 37%", "解出小文件… 37%"].contains(model.games.first?.game.state.title ?? ""))
+    phase = nil; model.refreshGameData()   // 第一次刷新时宿主已在解（报了阶段），这里不再起：installTried 里没有它 → 起一次
+    phase = nil; model.refreshGameData()   // 起过、宿主说已不在解、还是阶段 2 → 没解成
+    let state = model.games.first?.game.state
+    #expect(state == .installing(InstallStage(.failed, reason: why)))
+    #expect(state?.explanation.hasPrefix(why + "\n") == true)
+}
+
+// 联机设置是 App 全局偏好，供 ios/settings.m 在 App 启动时读取；未设置时保持原有自动联机行为。
+@MainActor @Test func shellLdnSettingsPersistAndExposeConditionalRows() throws {
+    let defaults = UserDefaults.standard
+    let keys = [ShellSettingsStore.ldnModeKey, ShellSettingsStore.ldnHostKey, ShellSettingsStore.ldnAddressKey]
+    let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.object(forKey: $0)) })
+    defer {
+        for (key, value) in previous {
+            if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+        }
+    }
+    keys.forEach(defaults.removeObject(forKey:))
+    let store = ShellSettingsStore()
+    #expect(store.ldnMode == "auto")
+    #expect(store.ldnHost == false)
+    #expect(store.ldnAddress.isEmpty)
+    #expect(ShellSettingsRows.ldnModeRow(store).value == "auto")
+    #expect(ShellSettingsRows.ldnHostRow(store) == nil)
+    #expect(!ShellSettingsRows.showsLdnAddress(store))
+
+    ShellSettingsRows.apply(ShellSettingsRows.ldnMode, value: "manual", to: store)
+    #expect(defaults.string(forKey: ShellSettingsStore.ldnModeKey) == "manual")
+    #expect(ShellSettingsRows.ldnHostRow(store)?.value == "0")
+    #expect(ShellSettingsRows.showsLdnAddress(store))
+    ShellSettingsRows.apply(ShellSettingsRows.ldnHost, value: "1", to: store)
+    #expect(defaults.bool(forKey: ShellSettingsStore.ldnHostKey))
+    #expect(!ShellSettingsRows.showsLdnAddress(store))
+    ShellSettingsRows.apply(ShellSettingsRows.ldnHost, value: "0", to: store)
+    ShellSettingsRows.apply(ShellSettingsRows.ldnAddress, value: "192.168.1.42", to: store)
+    #expect(store.ldnAddress == "192.168.1.42")
+    ShellSettingsRows.apply(ShellSettingsRows.ldnMode, value: "invalid", to: store)
+    #expect(store.ldnMode == "manual")
+    #expect(ShellSettingsStore().ldnAddress == "192.168.1.42")
+    ShellSettingsRows.apply(ShellSettingsRows.ldnMode, value: "auto", to: store)
+    #expect(store.ldnMode == "auto")
+    #expect(defaults.object(forKey: ShellSettingsStore.ldnModeKey) == nil)
+    #expect(ShellSettingsRows.ldnHostRow(store) == nil)
+    #expect(!ShellSettingsRows.showsLdnAddress(store))
+    defaults.set("invalid", forKey: ShellSettingsStore.ldnModeKey)
+    #expect(store.ldnMode == "auto")
+}
+
+// 共享表 app scope 的规范 id，与原生 / 设置 App 共用；旧键只迁移一次。
+@MainActor @Test func playSettingsCanonicalMigration() throws {
+    let suite = "s2a.test.play." + UUID().uuidString
+    let app = try #require(UserDefaults(suiteName: suite))
+    defer { app.removePersistentDomain(forName: suite) }
+    let stores = S2ArmGameSettings.Stores(game: { _ in nil }, app: app)
+    func value(_ key: String, game: String = "G1") -> String? {
+        S2ArmGameSettings.sections(for: game, stores: stores, state: .init(selected: "default", hasMine: false)).flatMap(\.rows).first { $0.id == key }?.value
+    }
+    #expect(value("splitScreen") == "auto" && value("screenOrientation") == "auto")
+    #expect((app.persistentDomain(forName: suite) ?? [:]).isEmpty)
+    app.set("on", forKey: "S2ASplitScreen"); app.set("portrait", forKey: "S2AScreenOrientation")
+    #expect(value("splitScreen") == "on" && value("screenOrientation") == "portrait")
+    #expect(app.string(forKey: "splitScreen") == "on" && app.string(forKey: "screenOrientation") == "portrait")
+    #expect(app.object(forKey: "S2ASplitScreen") == nil && app.object(forKey: "S2AScreenOrientation") == nil)
+    app.set("off", forKey: "splitScreen"); app.set("landscape", forKey: "screenOrientation")
+    app.set("on", forKey: "S2ASplitScreen"); app.set("portrait", forKey: "S2AScreenOrientation")
+    #expect(value("splitScreen", game: "G2") == "off" && value("screenOrientation", game: "G2") == "landscape")
+    #expect(app.object(forKey: "S2ASplitScreen") == nil && app.object(forKey: "S2AScreenOrientation") == nil)
+    app.register(defaults: ["splitScreen": "auto", "screenOrientation": "auto"])
+    #expect(value("splitScreen") == "off" && value("screenOrientation") == "landscape")
+    app.set(42, forKey: "splitScreen"); app.set([], forKey: "screenOrientation")
+    app.set("on", forKey: "S2ASplitScreen"); app.set("portrait", forKey: "S2AScreenOrientation")
+    #expect(value("splitScreen") == "auto" && value("screenOrientation") == "auto")
+    #expect((app.persistentDomain(forName: suite) ?? [:]).isEmpty)
+    for (key, values) in [("splitScreen", ["auto", "on", "off"]), ("screenOrientation", ["auto", "landscape", "portrait"])] {
+        for selected in values {
+            S2ArmGameSettings.apply(id: "G1", setting: key, value: selected, stores: stores)
+            #expect(app.string(forKey: key) == selected && value(key, game: "G2") == selected)
+        }
+        S2ArmGameSettings.apply(id: "G1", setting: key, value: "invalid", stores: stores)
+        #expect(app.string(forKey: key) == values.last)
+    }
+    #expect(app.object(forKey: "S2ASplitScreen") == nil && app.object(forKey: "S2AScreenOrientation") == nil)
+}
+
+/// #968 签名身份比对：描述文件 application-identifier 的应用部分与包名不一致才报。期望按规则手写（描述文件前后夹二进制，同真 CMS 包装）
+@Test func signingIdentityMismatch() {
+    func provision(_ appID: String) -> Data {
+        var d = Data([0x30, 0x82, 0x01, 0x00, 0xff])
+        d.append(Data("<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Entitlements</key><dict><key>application-identifier</key><string>\(appID)</string></dict></dict></plist>".utf8))
+        d.append(Data([0x00, 0xa0, 0x82]))
+        return d
+    }
+    #expect(SigningIdentity.mismatch(provision: provision("ABCDE12345.app.example.fixed"), bundleID: "io.s2arm.games") == "app.example.fixed")
+    #expect(SigningIdentity.mismatch(provision: provision("ABCDE12345.io.s2arm.games"), bundleID: "io.s2arm.games") == nil)
+    #expect(SigningIdentity.mismatch(provision: provision("ABCDE12345.*"), bundleID: "io.s2arm.games") == nil)
+    #expect(SigningIdentity.mismatch(provision: provision("ABCDE12345.io.s2arm.*"), bundleID: "io.s2arm.games") == nil)
+    #expect(SigningIdentity.mismatch(provision: provision("ABCDE12345.com.other.*"), bundleID: "io.s2arm.games") == "com.other.*")
+    #expect(SigningIdentity.mismatch(provision: nil, bundleID: "io.s2arm.games") == nil)
+    #expect(SigningIdentity.mismatch(provision: Data("no plist here".utf8), bundleID: "io.s2arm.games") == nil)
+}
+
+// 游戏音量（#1186，同齿轮菜单「声音」）：宿主给了 volume 才出「声音」一组、五档里取最接近的；改值交宿主（种类 volume、键 = 百分比）。期望手算
+@MainActor @Test func gameSettingsVolume() throws {
+    typealias O = S2ArmGameSettings.Options
+    var withVol = O(fps: .init(on: false, hidden: true), fullscreen: .init(on: false, hidden: true)); withVol.volume = 30
+    let opts: [String: O] = ["G7": withVol, "G8": O(fps: .init(on: false, hidden: true), fullscreen: .init(on: false, hidden: true))]
+    var sets: [String] = []
+    let tag = UUID().uuidString
+    let app = try #require(UserDefaults(suiteName: "s2a.test.app." + tag))
+    defer { app.removePersistentDomain(forName: "s2a.test.app." + tag) }
+    let stores = S2ArmGameSettings.Stores(game: { _ in app }, app: app, options: { opts[$0] },
+                                          setOption: { id, kind, key, on in sets.append("\(id) \(kind) \(key) \(on)"); return true })
+    let s = S2ArmGameSettings.sections(for: "G7", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(s.map(\.id) == ["s2a.identity", "s2a.picture", "s2a.sound", "s2a.vpad"])
+    let row = try #require(s.first { $0.id == "s2a.sound" }?.rows.first)
+    #expect(row.id == "gameVolume" && row.value == "25", "30 取最接近的 25 档")
+    if case .choice(let o) = row.kind { #expect(o.map(\.id) == ["0", "25", "50", "75", "100"] && o.first?.label == "Mute") } else { Issue.record("不是选项行") }
+    #expect(!S2ArmGameSettings.sections(for: "G8", stores: stores, state: .init(selected: "default", hasMine: false)).contains { $0.id == "s2a.sound" }, "宿主没给音量不出这一组")
+    S2ArmGameSettings.apply(id: "G7", setting: "gameVolume", value: "50", stores: stores)
+    S2ArmGameSettings.apply(id: "G7", setting: "gameVolume", value: "loud", stores: stores)
+    #expect(sets == ["G7 volume 50 true"], "非数字不交宿主")
+    #expect(O.parse(#"{"fps":{"on":false},"fullscreen":{"on":false},"volume":75}"#)?.volume == 75)
+    #expect(O.parse(#"{"fps":{"on":false},"fullscreen":{"on":false}}"#)?.volume == nil)
+}
+
+// 游戏语言（#1252，同游戏内设置页）：宿主给了 language 才出「语言」一组；当前值不在选项里按跟随系统；宿主那句「这款不支持 X」接在说明后；改值交宿主（种类 language、键 = 枚举名）。期望手算
+@MainActor @Test func gameSettingsLanguage() throws {
+    typealias O = S2ArmGameSettings.Options
+    let json = #"{"fps":{"on":false,"hidden":true},"fullscreen":{"on":false,"hidden":true},"language":{"pick":"Japanese","levels":[{"value":"system","label":"Same as system"},{"value":"AmericanEnglish","label":"English (US)"},{"value":"Japanese","label":"日本語"}],"note":"NOTE"}}"#
+    let withLang = try #require(O.parse(json))
+    #expect(withLang.language == .init(pick: "Japanese", levels: [.init(value: "system", label: "Same as system"), .init(value: "AmericanEnglish", label: "English (US)"), .init(value: "Japanese", label: "日本語")], note: "NOTE"))
+    var stale = withLang; stale.language?.pick = "Korean"; stale.language?.note = ""
+    let opts: [String: O] = ["G1": withLang, "G2": stale, "G3": O(fps: .init(on: false, hidden: true), fullscreen: .init(on: false, hidden: true))]
+    var sets: [String] = []
+    let tag = UUID().uuidString
+    let app = try #require(UserDefaults(suiteName: "s2a.test.app." + tag))
+    defer { app.removePersistentDomain(forName: "s2a.test.app." + tag) }
+    let stores = S2ArmGameSettings.Stores(game: { _ in app }, app: app, options: { opts[$0] },
+                                          setOption: { id, kind, key, on in sets.append("\(id) \(kind) \(key) \(on)"); return true })
+    let st = S2ArmGameSettings.LayoutState(selected: "default", hasMine: false)
+    let s = S2ArmGameSettings.sections(for: "G1", stores: stores, state: st)
+    #expect(s.map(\.id) == ["s2a.identity", "s2a.picture", "s2a.language", "s2a.vpad"])
+    let row = try #require(s.first { $0.id == "s2a.language" }?.rows.first)
+    #expect(row.id == "gameLanguage" && row.value == "Japanese")
+    #expect(row.note.hasSuffix(" · NOTE"), "宿主的说明接在后面：\(row.note)")
+    if case .choice(let o) = row.kind { #expect(o.map(\.id) == ["system", "AmericanEnglish", "Japanese"]) } else { Issue.record("不是选项行") }
+    let staleRow = try #require(S2ArmGameSettings.sections(for: "G2", stores: stores, state: st).first { $0.id == "s2a.language" }?.rows.first)
+    #expect(staleRow.value == "system" && !staleRow.note.contains("·"), "选的不在选项里按跟随系统；没有宿主说明不加分隔")
+    #expect(!S2ArmGameSettings.sections(for: "G3", stores: stores, state: st).contains { $0.id == "s2a.language" }, "宿主没给语言不出这一组")
+    #expect(O.parse(#"{"fps":{"on":false},"fullscreen":{"on":false},"language":{"pick":"system","levels":[]}}"#)?.language == nil, "空选项不出")
+    S2ArmGameSettings.apply(id: "G1", setting: "gameLanguage", value: "AmericanEnglish", stores: stores)
+    S2ArmGameSettings.apply(id: "G1", setting: "gameLanguage", value: "system", stores: stores)
+    #expect(sets == ["G1 language AmericanEnglish true", "G1 language system true"])
+}
+
+// 界面语言（#1252：游戏库齿轮页也能选）：与游戏内设置页同一个键 S2AUILanguage；「跟随系统」删键、不认的值不存
+@MainActor @Test func shellInterfaceLanguage() throws {
+    let key = ShellSettingsStore.interfaceLanguageKey, std = UserDefaults.standard, old = std.object(forKey: key)
+    defer { if let old { std.set(old, forKey: key) } else { std.removeObject(forKey: key) } }
+    #expect(key == "S2AUILanguage")
+    let store = ShellSettingsStore(defaults: std)
+    std.removeObject(forKey: key)
+    #expect(store.interfaceLanguage == "system")
+    ShellSettingsRows.apply(ShellSettingsRows.language, value: "ja", to: store)
+    #expect(std.string(forKey: key) == "ja" && ShellSettingsRows.languageRow(store).value == "ja")
+    ShellSettingsRows.apply(ShellSettingsRows.language, value: "de", to: store)
+    #expect(std.string(forKey: key) == "ja", "不认的值不存")
+    ShellSettingsRows.apply(ShellSettingsRows.language, value: "system", to: store)
+    #expect(std.object(forKey: key) == nil && store.interfaceLanguage == "system")
+    std.set("xx", forKey: key)
+    #expect(store.interfaceLanguage == "system", "存了不认的值按跟随系统显示")
+    if case .choice(let o) = ShellSettingsRows.languageRow(store).kind { #expect(o.map(\.id) == ["system", "zh-Hans", "zh-Hant", "en", "ja", "es", "fr"] && o[1].label == "简体中文") } else { Issue.record("不是选项行") }
+}

@@ -1,0 +1,128 @@
+using Ryujinx.Common.Logging;
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+
+namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+{
+    internal class LdnProxyTcpClient : NetCoreServer.TcpClient, ILdnTcpSocket
+    {
+        private readonly LanProtocol _protocol;
+        private byte[] _buffer;
+        private int _bufferEnd;
+        private int _localDisconnect;
+        private int _remoteDisconnectNotified;
+        private readonly IPAddress _localAddress;
+
+        public LdnProxyTcpClient(LanProtocol protocol, IPAddress address, int port, IPAddress localAddress = null) : base(address, port)
+        {
+            _protocol = protocol;
+            _localAddress = localAddress;
+            _buffer = new byte[LanProtocol.BufferSize];
+            OptionSendBufferSize = LanProtocol.TcpTxBufferSize;
+            OptionReceiveBufferSize = LanProtocol.TcpRxBufferSize;
+            OptionSendBufferLimit = LanProtocol.TxBufferSizeMax;
+            OptionReceiveBufferLimit = LanProtocol.RxBufferSizeMax;
+        }
+
+        protected override Socket CreateSocket()
+        {
+            Socket socket = base.CreateSocket();
+            if (_localAddress != null && !socket.IsBound)
+            {
+                socket.Bind(new IPEndPoint(_localAddress, 0));
+            }
+
+            return socket;
+        }
+
+        protected override void OnConnected()
+        {
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"LdnProxyTCPClient connected!");
+        }
+
+        protected override void OnReceived(byte[] buffer, long offset, long size)
+        {
+            _protocol.Read(ref _buffer, ref _bufferEnd, buffer, (int)offset, (int)size);
+        }
+
+        public void DisconnectAndStop()
+        {
+            Interlocked.Exchange(ref _localDisconnect, 1);
+            DisconnectAsync();
+
+            while (IsConnected)
+            {
+                Thread.Yield();
+            }
+        }
+
+        public bool SendPacketAsync(EndPoint endPoint, byte[] data)
+        {
+            if (endPoint != null)
+            {
+                Logger.Warning?.PrintMsg(LogClass.ServiceLdn, "LdnProxyTcpClient is sending a packet but endpoint is not null.");
+            }
+
+            if (IsConnecting && !IsConnected)
+            {
+                Logger.Info?.PrintMsg(LogClass.ServiceLdn, "LdnProxyTCPClient needs to connect before sending packets. Waiting...");
+
+                while (IsConnecting && !IsConnected)
+                {
+                    Thread.Yield();
+                }
+            }
+
+            return SendAsync(data);
+        }
+
+        protected override void OnError(SocketError error)
+        {
+            Logger.Error?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnProxyTCPClient caught an error with code {error}; endpoint={Endpoint}, connected={IsConnected}");
+        }
+
+        protected override void OnDisconnected()
+        {
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnProxyTCPClient disconnected; endpoint={Endpoint}, localClose={Volatile.Read(ref _localDisconnect) != 0}");
+
+            if (Volatile.Read(ref _localDisconnect) == 0 &&
+                Interlocked.Exchange(ref _remoteDisconnectNotified, 1) == 0)
+            {
+                _protocol.InvokeClientDisconnected(this);
+            }
+        }
+
+        protected override void Dispose(bool disposingManagedResources)
+        {
+            DisconnectAndStop();
+            base.Dispose(disposingManagedResources);
+        }
+
+        public override bool Connect()
+        {
+            // TODO: NetCoreServer has a Connect() method, but it currently leads to weird issues.
+            base.ConnectAsync();
+
+            while (IsConnecting)
+            {
+                Thread.Sleep(1);
+            }
+
+            return IsConnected;
+        }
+
+        public bool Start()
+        {
+            throw new InvalidOperationException("Start was called.");
+        }
+
+        public bool Stop()
+        {
+            throw new InvalidOperationException("Stop was called.");
+        }
+    }
+}

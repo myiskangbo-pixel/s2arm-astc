@@ -1,0 +1,747 @@
+cmake_minimum_required(VERSION 3.16)
+project(s2arm_android LANGUAGES C CXX)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+option(S2A_ANDROID_EXPERIMENTAL_TOUCH "Build opt-in touch transport and HID consumer" OFF)
+# 性能构建：APK 仍走 Debug 安装流程（-g/断言/符号），但游戏 native 热点必须优化。
+# 不能只优化探针 target 或 Java；NativeAOT 已是 Release。
+if(S2A_ANDROID_NATIVE_MODE STREQUAL "game")
+    string(APPEND CMAKE_C_FLAGS_DEBUG " -O2")
+    string(APPEND CMAKE_CXX_FLAGS_DEBUG " -O2")
+endif()
+# 共享 NVN 前端 + 生产 direct provider + S2Arm 自己 Vulkan 后端的编译门。选项名沿用历史
+# S2A_ANDROID_VK_ENGINE（外部脚本与文档都用 S2ARM_ANDROID_VK_ENGINE=1 打开）：名字里的 engine
+# 指已删除的 d2r NVN->Vulkan 回放引擎副本，现在这里只编自有后端。
+# 旧回放层（nvn_vk：mtl_vk_shim / mtl_vk_adapter / nvn_vk_* / vk_record …）与只有它能链的「引擎关」直连清单已删除
+# （#1501 owner 11-20 定删）。直连核心现在只有新回放层（nvk = graphics/nvn/replay + nvn_gpu_* Vulkan 后端 + native/gfx_plat 平台件），
+# 它要共享 NVN 前端才链得上，所以引擎缺省开；显式关、或传旧后端名，配置时报错，不静默编一个没有直连核心的库。
+option(S2A_ANDROID_VK_ENGINE "Build the shared NVN frontend + direct provider + nvk replay layer into the APK (required)" ON)
+if(ANDROID AND NOT S2A_ANDROID_VK_ENGINE)
+    message(FATAL_ERROR "S2A_ANDROID_VK_ENGINE=OFF: engine-off builds were removed with the old replay layer (#1501); the nvk direct core needs the shared NVN frontend. Configure with S2A_ANDROID_VK_ENGINE=ON")
+endif()
+set(S2ARM_ANDROID_VK_BACKEND "nvk" CACHE STRING "NVN backend behind the shared frontend: nvk (new replay layer; the only one)")
+set_property(CACHE S2ARM_ANDROID_VK_BACKEND PROPERTY STRINGS nvk)
+if(NOT S2ARM_ANDROID_VK_BACKEND STREQUAL "nvk")
+    message(FATAL_ERROR "S2ARM_ANDROID_VK_BACKEND=${S2ARM_ANDROID_VK_BACKEND}: the old replay layer (nvn_vk) and the d2r 'engine' backend were deleted (#1501); use nvk")
+endif()
+set(S2A_ANDROID_VAMM_LAYOUT "alias" CACHE STRING "Guest virtual memory layout: alias or balanced")
+set_property(CACHE S2A_ANDROID_VAMM_LAYOUT PROPERTY STRINGS alias balanced)
+if(NOT S2A_ANDROID_VAMM_LAYOUT MATCHES "^(alias|balanced)$")
+    message(FATAL_ERROR "S2A_ANDROID_VAMM_LAYOUT must be alias or balanced")
+endif()
+option(S2A_ANDROID_REWRITER "Build the experimental standalone preparation JNI library" OFF)
+# Native-only link probe used by core-link/link_symbols.py: a generated C file
+# references every C# native entry, so ld.lld -z defs is the final judge even
+# when the NativeAOT archive is absent. Empty = normal build.
+set(S2A_ANDROID_LINK_PROBE "" CACHE FILEPATH "Optional generated C file with link-symbol references")
+set(S2A_ANDROID_LINK_AVC_ARCHIVE "" CACHE FILEPATH "Real libavc archive for the link-symbol probe")
+set(S2A_CS_STATIC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../build/android-cs/static" CACHE PATH
+    "NativeAOT static service output (cs/build.sh), overridable for isolated link probes")
+
+# native/memory.c 用 Linux 专属 mremap / MREMAP_MAYMOVE：只在 Android（bionic 有）与
+# Linux 宿主上建；其他宿主不建这个库、也不建依赖它的宿主测试（memory_test / plat_test
+# 在 else() 段同步按 CMAKE_SYSTEM_NAME 门掉），跳过由 test.sh 显式报「未测」不静默当绿。
+if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+add_library(s2arm_android_memory STATIC native/memory.c)
+set_target_properties(s2arm_android_memory PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(s2arm_android_memory PUBLIC native)
+target_compile_definitions(s2arm_android_memory PRIVATE _GNU_SOURCE)
+target_compile_options(s2arm_android_memory PRIVATE -Wall -Wextra -Werror)
+endif()
+
+if(ANDROID)
+    if(NOT ANDROID_ABI STREQUAL "arm64-v8a")
+        message(FATAL_ERROR "The native-execution Android host requires arm64-v8a")
+    endif()
+    include(core-link/CoreLink.cmake)
+    enable_language(ASM)
+    # One source list for the build and the symbol gate (core-link/LinkSources.cmake).
+    include(core-link/LinkSources.cmake)
+    s2a_android_host_sources(host_sources)
+    add_library(s2arm_android SHARED ${host_sources})
+    # Independent native boundary: never enabled in Release/RelWithDebInfo/MinSizeRel.
+    target_compile_definitions(s2arm_android PRIVATE $<$<CONFIG:Debug>:S2A_ANDROID_DEBUG_ENV=1>)
+    # 窗口/呈现始终用 Android Vulkan surface；direct 后端只是额外的消费者。
+    target_compile_definitions(s2arm_android PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
+    include(core-link/NvnDirect.cmake)
+    s2a_android_direct_core(s2arm_android)
+    if(S2A_ANDROID_VK_ENGINE)
+        # NVN 名字表从 names.txt 生成（与 nvn_count.h 的 NVN_NFUNC 同源），不手抄。
+        set(s2a_nvn_names "${CMAKE_CURRENT_SOURCE_DIR}/../graphics/nvn/gfx/nvn/names.txt")
+        add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/nvn_names_android.c"
+            COMMAND "${CMAKE_COMMAND}" -D "NAMES=${s2a_nvn_names}"
+                    -D "OUT=${CMAKE_CURRENT_BINARY_DIR}/nvn_names_android.c"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/native/nvn/gen_nvn_names.cmake"
+            DEPENDS "${s2a_nvn_names}" "${CMAKE_CURRENT_SOURCE_DIR}/native/nvn/gen_nvn_names.cmake"
+            VERBATIM)
+        set_property(SOURCE "${CMAKE_CURRENT_BINARY_DIR}/nvn_names_android.c" APPEND PROPERTY
+            INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../graphics/nvn/gfx/nvn")
+        set(s2a_frontend_c
+            native/nvn/portable.c native/nvn/s2a_vp_alias.c ../graphics/nvn/gfx/nvn/hle_nvn.c
+            # Switch 2（NVN2）：hle_nvn.c 调 nvn2_on / nvn2_key / nvn2_device_*（graphics/nvn/gfx/nvn/nvn2.c，SHA-256 走 portable.c 的 CommonCrypto 兼容层）
+            ../graphics/nvn/gfx/nvn/nvn2.c
+            ../graphics/nvn/gfx/nvn/nvn_fps.c
+            "${CMAKE_CURRENT_BINARY_DIR}/nvn_names_android.c"
+            # App 已经提供 now_ns/guest_ns/module_of，所以用去掉这几项的探针宿主 shim
+            # （frontend_test_host.c 直接编进来会 duplicate symbol）。
+            native/nvn/vk_engine_host_shim.c
+            native/nvn/shader_survey.c)
+        # 共享前端同样不跟本仓 -Werror（格式化串/聚合初始化在 Android 上按 64 位 long 处理）。
+        set_source_files_properties(${s2a_frontend_c} PROPERTIES COMPILE_OPTIONS "-Wno-error")
+        # 新回放层直接实现 nvn_be_*：没有名字转接头，没有 shim。回放核心与后端源在 LinkSources.cmake 的 nvk 清单里。
+        target_sources(s2arm_android PRIVATE ${s2a_frontend_c}
+            native/gfx_plat/provider_nvk.c native/direct/profile_compose.c
+            native/nvn/guest_window_crop.c native/nvn/guest_window_crop.S)
+        target_compile_definitions(s2arm_android PRIVATE S2A_ANDROID_VK_BACKEND_NVK=1)
+        # S2A_ANDROID_VK_BACKEND_NVN_VK 是历史名，代码里的含义是「不是已删除的 d2r 旧引擎」（vk_device.c 的必需特性表），照旧定义。
+        target_compile_definitions(s2arm_android PRIVATE S2A_ANDROID_VK_ENGINE=1 S2A_ANDROID_VK_BACKEND_NVN_VK=1)
+    endif()
+    # The JNI ABI this library is built against (native/jni_abi.py over the Java native declarations), a
+    # build-time output: a change of either Java source regenerates it before bridge.cpp compiles.
+    # NativeBridge.load refuses a library whose hash differs from the installed APK's Java side, and
+    # verify-apk.py fails an APK whose library does not carry the hash of these sources.
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(s2a_jni_java "${CMAKE_CURRENT_SOURCE_DIR}/app/src/main/java/org/s2arm/android/NativeBridge.java"
+        "${CMAKE_CURRENT_SOURCE_DIR}/app/src/main/java/org/s2arm/android/TouchInputBridge.java")
+    add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/s2a_jni_abi.h"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/native/jni_abi.py"
+            --header "${CMAKE_CURRENT_BINARY_DIR}/s2a_jni_abi.h" ${s2a_jni_java}
+        DEPENDS ${s2a_jni_java} "${CMAKE_CURRENT_SOURCE_DIR}/native/jni_abi.py"
+        COMMENT "JNI ABI of NativeBridge / TouchInputBridge" VERBATIM)
+    # A build step of its own, not a target source (the core-link audit reads the target's source list);
+    # bridge.cpp's compiler depfile makes it recompile whenever the header's bytes change.
+    add_custom_target(s2a_jni_abi DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/s2a_jni_abi.h")
+    add_dependencies(s2arm_android s2a_jni_abi)
+    target_include_directories(s2arm_android PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+    if(S2A_ANDROID_NATIVE_MODE STREQUAL "game")
+        # 编解码静态库（libs2a_avc.a / libs2a_opus.a / libs2a_vpx.a）由
+        # android/codecs/build.sh 产出；此前 Android 侧没有任何地方链接它们，
+        # game 模式恒定缺 18 个编解码符号。传参：
+        # -DS2A_ANDROID_CODEC_LIBS="libs2a_avc.a;libs2a_opus.a;libs2a_vpx.a"
+        # 未显式给出时先按 android/codecs/build.sh 的缓存约定自动找；仍找不到只告警——
+        # 链接期会以缺符号暴露（现状），不能让只做链接门禁的配置（ctest_link 的 game 档）
+        # 在 configure 阶段就红。
+        if(NOT S2A_ANDROID_CODEC_LIBS)
+            set(_codec_cache "$ENV{S2A_BUILD_CACHE}")
+            if(NOT _codec_cache)
+                set(_codec_cache "$ENV{HOME}/.cache/s2arm-build")
+            endif()
+            include(core-link/CodecArchives.cmake)
+            s2a_android_codec_archives(S2A_ANDROID_CODEC_LIBS "${_codec_cache}")
+        endif()
+        foreach(codec_lib IN LISTS S2A_ANDROID_CODEC_LIBS)
+            if(NOT EXISTS "${codec_lib}")
+                message(FATAL_ERROR "S2A_ANDROID_CODEC_LIBS entry does not exist: ${codec_lib}")
+            endif()
+        endforeach()
+        s2a_android_game_sources(game_sources)
+        target_sources(s2arm_android PRIVATE ${game_sources})
+        # 游戏 sdk 里的 SDK 主版本 / 自带驱动报的 NVN API 版本（与苹果宿主共用 nvn_drvinfo.inc）：
+        # 要装载器的模块表（game 模式才有）和共用前端（VK 引擎才编）都在，所以放在这里而不是前端源列表。
+        if(S2A_ANDROID_VK_ENGINE)
+            target_sources(s2arm_android PRIVATE native/nvn/nvn_drvinfo_android.c)
+            set_source_files_properties(native/nvn/nvn_drvinfo_android.c PROPERTIES COMPILE_OPTIONS "-Wno-error")
+        endif()
+        # Bionic exposes process_vm_readv (used by crash.c's safe frame read)
+        # only with GNU feature declarations.
+        set_property(SOURCE "${S2A_ANDROID_RUNTIME_ROOT}/runtime/src/crash.c" APPEND PROPERTY COMPILE_DEFINITIONS _GNU_SOURCE)
+        # thread.c 用到 pthread_getname_np（bionic 在 _GNU_SOURCE 下才声明），与 crash.c 同一处理。
+        set_property(SOURCE "${S2A_ANDROID_RUNTIME_ROOT}/runtime/src/thread.c" APPEND PROPERTY COMPILE_DEFINITIONS _GNU_SOURCE)
+        target_include_directories(s2arm_android PRIVATE .. ../runtime/src native ../graphics/track)
+        target_compile_definitions(s2arm_android PRIVATE S2A_ANDROID_GAME_RUNTIME=1)
+        # Reuse the shared layout policy. Balanced trades alias capacity for a larger heap;
+        # keep the existing alias-first default for games requiring the large alias range.
+        target_compile_definitions(s2arm_android PRIVATE
+            S2A_VAMM_BALANCED=$<STREQUAL:${S2A_ANDROID_VAMM_LAYOUT},balanced>)
+    else()
+        s2a_android_diagnostic_sources(diagnostic_sources)
+        target_sources(s2arm_android PRIVATE ${diagnostic_sources})
+        target_include_directories(s2arm_android PRIVATE .. ../graphics/track native/runtime/tracking)
+    endif()
+    target_include_directories(s2arm_android PRIVATE ../runtime/include)
+    target_compile_options(s2arm_android PRIVATE -Wall -Wextra -Werror)
+    # main 的 NVN 记录 helper 用指定初始化器且省略零字段（Apple 构建没开这条 -Werror）。
+    # 必须在 -Wall -Wextra 之后再关：-Wextra 会把组里的告警重新打开。语义不变。
+    target_compile_options(s2arm_android PRIVATE
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-Wno-missing-designated-field-initializers>")
+    target_link_libraries(s2arm_android PRIVATE s2arm_android_memory android log vulkan aaudio mediandk)
+    if(S2A_ANDROID_NATIVE_MODE STREQUAL "game")
+        target_link_libraries(s2arm_android PRIVATE ${S2A_ANDROID_CODEC_LIBS})
+        # 窄 shim：选驱动时把实例创建入口路由到 adrenotools 的私有 loader；其余 Vulkan 命令不变。
+        target_compile_definitions(s2arm_android PRIVATE S2A_ANDROID_VK_LOADER_SHIM=1)
+        target_link_options(s2arm_android PRIVATE
+            -Wl,--wrap=vkEnumerateInstanceVersion
+            -Wl,--wrap=vkEnumerateInstanceExtensionProperties
+            -Wl,--wrap=vkEnumerateInstanceLayerProperties
+            -Wl,--wrap=vkCreateInstance
+            -Wl,--wrap=vkGetInstanceProcAddr)
+    endif()
+    if(S2A_ANDROID_EXPERIMENTAL_TOUCH)
+        target_compile_definitions(s2arm_android PRIVATE S2A_ANDROID_EXPERIMENTAL_TOUCH=1)
+    endif()
+    # NDK 29 defaults to 16 KB ELF alignment; keep it explicit for this library.
+    target_link_options(s2arm_android PRIVATE -Wl,-z,max-page-size=16384 -Wl,-z,defs)
+    target_compile_definitions(s2arm_android PRIVATE $<$<CONFIG:Debug>:S2A_CAPACITY_WRAP=1>)
+    target_link_options(s2arm_android PRIVATE $<$<CONFIG:Debug>:-Wl,--wrap=pthread_create>)
+    # 外挂 Vulkan 驱动：libadrenotools（BSD-2-Clause）与它的 hook 库。刻意做成三个独立的
+    # 共享库、不链进 s2arm_android——没有选择驱动时谁也不会加载它们（linkernsbypass 的
+    # 构造器会改 dlopen 所在页的保护），系统驱动路径与改前完全相同。
+    set(S2A_ADRENOTOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libadrenotools")
+    add_library(s2a_linkernsbypass STATIC
+        "${S2A_ADRENOTOOLS_DIR}/lib/linkernsbypass/android_linker_ns.cpp"
+        "${S2A_ADRENOTOOLS_DIR}/lib/linkernsbypass/elf_soname_patcher.cpp")
+    set_target_properties(s2a_linkernsbypass PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(s2a_linkernsbypass PUBLIC "${S2A_ADRENOTOOLS_DIR}/lib/linkernsbypass")
+    target_compile_options(s2a_linkernsbypass PRIVATE -O2 -w)
+    add_library(adrenotools SHARED "${S2A_ADRENOTOOLS_DIR}/src/driver.cpp")
+    target_include_directories(adrenotools PRIVATE "${S2A_ADRENOTOOLS_DIR}/include" "${S2A_ADRENOTOOLS_DIR}")
+    target_compile_options(adrenotools PRIVATE -O2 -w)
+    target_link_libraries(adrenotools PRIVATE s2a_linkernsbypass android log dl)
+    add_library(hook_impl SHARED
+        "${S2A_ADRENOTOOLS_DIR}/src/hook/hook_impl.cpp"
+        "${S2A_ADRENOTOOLS_DIR}/src/hook/adreno_binder_compat.c")
+    target_include_directories(hook_impl PRIVATE "${S2A_ADRENOTOOLS_DIR}/include")
+    target_compile_options(hook_impl PRIVATE -O2 -w)
+    set_target_properties(hook_impl PROPERTIES CXX_VISIBILITY_PRESET hidden)
+    target_link_options(hook_impl PRIVATE -Wl,-z,global)
+    target_link_libraries(hook_impl PRIVATE s2a_linkernsbypass android log dl)
+    add_library(main_hook SHARED "${S2A_ADRENOTOOLS_DIR}/src/hook/main_hook.c")
+    target_include_directories(main_hook PRIVATE "${S2A_ADRENOTOOLS_DIR}/include")
+    target_compile_options(main_hook PRIVATE -O2 -w)
+    target_link_options(main_hook PRIVATE -Wl,-z,global)
+    target_link_libraries(main_hook PRIVATE hook_impl)
+    # Single-library build (S2ARM_ANDROID_CS_SERVICES=static, passed by Gradle): the NativeAOT
+    # service layer and the runtime pieces the SDK listed (cs/build.sh) link into this library,
+    # with s2a_native bound to the explicitly selected diagnostic or real game provider.
+    #
+    # S2A_ANDROID_LINK_PROBE is the gate-only variant: it links the same native sources and
+    # provider selection plus a generated object that references the C# entry points, so
+    # ld.lld -z defs checks the provider set without a NativeAOT archive or an APK.
+    if(S2A_ANDROID_LINK_PROBE)
+        s2a_android_static_sources(static_sources "${S2A_ANDROID_NATIVE_MODE}")
+        target_sources(s2arm_android PRIVATE ${static_sources} "${S2A_ANDROID_LINK_PROBE}")
+        if(S2A_ANDROID_LINK_AVC_ARCHIVE)
+            target_link_libraries(s2arm_android PRIVATE "${S2A_ANDROID_LINK_AVC_ARCHIVE}")
+        endif()
+        target_include_directories(s2arm_android PRIVATE ../runtime/include)
+        target_compile_definitions(s2arm_android PRIVATE S2A_CS_STATIC=1)
+    elseif(S2A_CS_SERVICES STREQUAL "static")
+        set(cs_static "${S2A_CS_STATIC_DIR}")
+        if(NOT EXISTS "${cs_static}/link.txt" OR NOT EXISTS "${cs_static}/libs2a_cs.a")
+            message(FATAL_ERROR "Run cs/build.sh with S2ARM_ANDROID_CS_SERVICES=static first")
+        endif()
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${cs_static}/link.txt")
+        include(core-link/StaticLinkInputs.cmake)
+        s2a_read_native_link_inputs("${cs_static}/link.txt" cs_link_inputs)
+        s2a_android_static_sources(static_sources "${S2A_ANDROID_NATIVE_MODE}")
+        if(static_sources)
+            # 只读 guest 复制依赖 s2a_mem_*，与静态服务的诊断 provider 一起编入。
+            # 普通 / 动态服务诊断不运行 guest；game 由 Runtime.cmake 提供真实 VM 和复制实现。
+            target_sources(s2arm_android PRIVATE ${static_sources})
+        endif()
+        target_include_directories(s2arm_android PRIVATE ../runtime/include)
+        target_compile_definitions(s2arm_android PRIVATE S2A_CS_STATIC=1)
+        # Archive symbols (managed code, runtime) stay inside this library.
+        target_link_libraries(s2arm_android PRIVATE "${cs_static}/libs2a_cs.a" ${cs_link_inputs} -Wl,--exclude-libs,ALL)
+        # NativeAOT 的模块注册段用 __start_/__stop___modules 这种封装符号。较新的 lld（NDK r29）
+        # 默认按 start-stop-gc 语义把这类符号连同段一起丢掉，链接就报 undefined symbol __stop___modules；
+        # 老版本 lld 没这个开关，所以先探测再用，不假设工具链版本。
+        include(CheckLinkerFlag)
+        check_linker_flag(C "-Wl,-z,nostart-stop-gc" S2A_LINKER_HAS_NOSTART_STOP_GC)
+        if(S2A_LINKER_HAS_NOSTART_STOP_GC)
+            target_link_options(s2arm_android PRIVATE -Wl,-z,nostart-stop-gc)
+        endif()
+        s2a_audit_diagnostic_core_link(s2arm_android "${cs_static}/libs2a_cs.a"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../services/S2A.Services" "${cs_static}/link.txt" "${S2A_ANDROID_NATIVE_MODE}")
+    endif()
+    if(S2A_ANDROID_REWRITER)
+        add_subdirectory(rewriter)
+    endif()
+else()
+    enable_testing()
+    add_executable(dma_read_config_test tests/dma_read_config_test.c)
+    target_include_directories(dma_read_config_test PRIVATE native)
+    target_compile_options(dma_read_config_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_dma_read_config COMMAND dma_read_config_test)
+    add_executable(touch_input_test tests/touch_input_test.c native/touch_input.c)
+    target_include_directories(touch_input_test PRIVATE native ../runtime/include)
+    target_compile_options(touch_input_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(touch_input_test PRIVATE pthread)
+    add_test(NAME android_touch_input COMMAND touch_input_test)
+    add_executable(game_touch_test tests/game_touch_test.c native/game_touch.c native/touch_input.c)
+    target_include_directories(game_touch_test PRIVATE native ../runtime/include)
+    target_compile_definitions(game_touch_test PRIVATE S2A_ANDROID_EXPERIMENTAL_TOUCH=1)
+    target_compile_options(game_touch_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(game_touch_test PRIVATE pthread)
+    add_test(NAME android_game_touch COMMAND game_touch_test)
+    # 直连安全网安卓接线：共用 runtime/src/dguard.c 真跑，只替换属性开关与提示出口
+    add_executable(dguard_android_test tests/dguard_android_test.c native/dguard_android.c native/docs_android.c ../runtime/src/dguard.c)
+    target_include_directories(dguard_android_test PRIVATE native ../runtime/include ../runtime/src)
+    target_compile_definitions(dguard_android_test PRIVATE S2A_DGUARD_TEST=1)
+    target_compile_options(dguard_android_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(dguard_android_test PRIVATE pthread)
+    add_test(NAME android_dguard_android COMMAND dguard_android_test)
+    # 停帧救场「这款下次也关」：起局读 S2A_DOCS/cpatch_stall_off → S2A_FPS60=0（docs_android.c s2a_android_stall_off_apply）
+    add_executable(stall_off_test tests/stall_off_test.c native/docs_android.c)
+    target_include_directories(stall_off_test PRIVATE native)
+    target_compile_options(stall_off_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_stall_off COMMAND stall_off_test)
+    find_package(Threads REQUIRED)
+    # Linux errno/fd/filesystem contracts; reached by linux_ctest.sh, including
+    # Darwin's Linux VM route. These are not Android device durability evidence.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(savecommit_host_test cs/savecommit/tests/native_host_test.c native/s2a_savecommit.c)
+        target_compile_options(savecommit_host_test PRIVATE -Wall -Wextra -Werror -Wpedantic)
+        target_link_options(savecommit_host_test PRIVATE
+            -Wl,--wrap=fsetxattr -Wl,--wrap=fgetxattr -Wl,--wrap=mkdirat
+            -Wl,--wrap=fsync -Wl,--wrap=ioctl -Wl,--wrap=write
+            -Wl,--wrap=syscall -Wl,--wrap=s2a_savecommit_exchange)
+        target_link_libraries(savecommit_host_test PRIVATE Threads::Threads)
+        add_test(NAME android_savecommit_host COMMAND savecommit_host_test "${CMAKE_CURRENT_BINARY_DIR}")
+        add_executable(savecommit_openread_test cs/savecommit/tests/open_read_host_test.c native/s2a_savecommit.c)
+        target_compile_options(savecommit_openread_test PRIVATE -Wall -Wextra -Werror -Wpedantic)
+        target_link_options(savecommit_openread_test PRIVATE
+            -Wl,--wrap=open -Wl,--wrap=fstat -Wl,--wrap=s2a_savecommit_open_read)
+        add_test(NAME android_savecommit_openread COMMAND savecommit_openread_test "${CMAKE_CURRENT_BINARY_DIR}")
+        set_tests_properties(android_savecommit_host android_savecommit_openread PROPERTIES TIMEOUT 30)
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    # macOS ld64 不接受未定义弱引用（ELF 语义是「缺定义即空指针」）：androiddraw 场合
+    # 登记的弱符号由 tools/weak_link_decl.py（唯一来源）生成 Darwin 未定义弱符号放行参数
+    # （与 android/tests/host_link.py 给 Python 侧宿主单测补链的是同一机制）。
+    set(s2a_weak_u "")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        execute_process(COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../tools/weak_link_decl.py" flags androiddraw
+            OUTPUT_VARIABLE s2a_weak_u_out OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE s2a_weak_u_rc)
+        if(NOT s2a_weak_u_rc EQUAL 0)
+            message(FATAL_ERROR "weak_link_decl.py flags androiddraw 失败（rc=${s2a_weak_u_rc}）")
+        endif()
+        separate_arguments(s2a_weak_u UNIX_COMMAND "${s2a_weak_u_out}")
+    endif()
+    add_test(NAME android_codec_archives
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/core-link/test_codec_archives.py"
+            --cmake "${CMAKE_COMMAND}")
+    add_test(NAME android_static_link_inputs
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/core-link/test_static_link_inputs.py"
+            --cmake "${CMAKE_COMMAND}")
+    add_test(NAME android_core_link_audit
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/core-link/test_audit.py")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test(NAME android_nativeaot_startup_roots
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/core-link/test_startup_roots.py"
+                --cc "${CMAKE_C_COMPILER}" --linker "${CMAKE_LINKER}"
+                --nm "${CMAKE_NM}" --readelf "${CMAKE_READELF}" --ar "${CMAKE_AR}")
+    endif()
+    # #528 第 15 项：会话标记（原生优雅收尾走完才删 end）单独成一项。run_lifecycle.py 整组挂在 threaded_host_suites.sh 末尾，
+    #   macOS 跳过、Linux 上常被前面的 Runtime.Tests 挡住；组内又排在 hang 等断言后面。这里只跑标记那组（同一夹具、同一编译命令）。
+    #   只在 Linux：夹具要 GNU ld 的 --wrap。android/linux_ctest.sh（colima）与 Linux 上 android/test.sh 的原生段 ctest 都会跑到。
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test(NAME android_session_marker
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/native/runtime/platform/tests/run_lifecycle.py"
+                --session-marker-only --out "${CMAKE_CURRENT_BINARY_DIR}/session-marker")
+        set_tests_properties(android_session_marker PROPERTIES ENVIRONMENT "CC=${CMAKE_C_COMPILER}")
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(memory_test tests/memory_test.c)
+        target_compile_definitions(memory_test PRIVATE _GNU_SOURCE)
+        target_compile_options(memory_test PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(memory_test PRIVATE s2arm_android_memory)
+        add_test(NAME android_memory COMMAND memory_test)
+    endif()
+    add_executable(input_test tests/input_test.c native/input.c)
+    target_include_directories(input_test PRIVATE native)
+    target_compile_options(input_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(input_test PRIVATE Threads::Threads)
+    add_test(NAME android_input COMMAND input_test)
+    # 手机当掌机的六轴 / 震动（#528 第 10 项）：方向 → 坐标基、加速度口径、震动振幅与租约节奏，配共用 phone_axes.c 真跑
+    add_executable(phone_feedback_test tests/phone_feedback_test.c ../runtime/src/phone_axes.c ../runtime/src/motion_pick.c)
+    target_include_directories(phone_feedback_test PRIVATE native ../runtime/include)
+    target_compile_options(phone_feedback_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(phone_feedback_test PRIVATE m)
+    add_test(NAME android_phone_feedback COMMAND phone_feedback_test)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(tsd_test tests/tsd_test.c native/tsd.c)
+        target_include_directories(tsd_test PRIVATE native)
+        target_compile_options(tsd_test PRIVATE -Wall -Wextra -Werror)
+        add_test(NAME android_tsd COMMAND tsd_test)
+        add_executable(module_test tests/module_test.c native/module.c)
+        target_include_directories(module_test PRIVATE native)
+        target_compile_options(module_test PRIVATE -Wall -Wextra -Werror)
+        add_test(NAME android_module COMMAND module_test)
+    endif()
+    # guest_signal.c / guest_signal_test.c 用 Linux 专属的 SIGRTMIN / asm/sigcontext.h /
+    # ucontext 语义：与 s2arm_android_memory 同一门，非 Linux 宿主不建不静默当绿。
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(guest_signal_test tests/guest_signal_test.c native/guest_signal.c native/redlog.c)
+        target_include_directories(guest_signal_test PRIVATE native ../runtime/include)
+        target_compile_options(guest_signal_test PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(guest_signal_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+        add_test(NAME android_guest_signal COMMAND guest_signal_test)
+    endif()
+    # 红日志落盘（#1357）：注入目录后 red() 写 <dir>/red.log 与宿主日志 fd 各一行，abort 前 fsync。
+    add_executable(redlog_test tests/redlog_test.c native/redlog.c)
+    target_include_directories(redlog_test PRIVATE native ../runtime/include ../runtime/src)
+    target_compile_options(redlog_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_redlog COMMAND redlog_test)
+    add_executable(hostapi_test tests/hostapi_test.c native/hostapi.c)
+    target_include_directories(hostapi_test PRIVATE native ../runtime/include)
+    target_compile_options(hostapi_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_hostapi COMMAND hostapi_test)
+    add_executable(host_ui_test w4-tests/host_ui_test.c w4-tests/wait_probe.c native/host_ui.c native/hostapi.c)
+    target_include_directories(host_ui_test PRIVATE native ../runtime/include)
+    target_compile_options(host_ui_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(host_ui_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    add_test(NAME android_host_ui COMMAND host_ui_test)
+    # 显示节拍源（#48 B1）：替身 ALooper/AChoreographer 测契约与 link 助手——
+    # 节拍到达、60Hz 槽位等拍、丢拍超时、后台停、重启、门（debug.s2a.vsync）、不可用回退。
+    # NDK 真头不 vendored 进仓库（AOSP Apache-2.0 入库要按 NOTICE 登记）：
+    # -idirafter 本机 NDK sysroot/usr/include——<android/*.h> 取自真头，
+    # 宿主 libc / 编译器内建头照旧（idirafter 排在 -I 与系统目录之后，只兜底 <android/*.h>）。
+    # NDK 候选序列与 core-link/link_symbols.py 一致（固定 29.0.14206865）。
+    set(_vs_ndk_cands
+        "$ENV{ANDROID_NDK_HOME}" "$ENV{ANDROID_NDK_ROOT}"
+        "$ENV{ANDROID_HOME}/ndk/29.0.14206865" "$ENV{ANDROID_SDK_ROOT}/ndk/29.0.14206865"
+        "$ENV{HOME}/Library/Android/sdk/ndk/29.0.14206865" "$ENV{HOME}/Android/Sdk/ndk/29.0.14206865"
+        "/opt/homebrew/share/android-ndk" "/usr/local/share/android-ndk" "/opt/android-ndk")
+    set(_vs_inc "")
+    foreach(_ndk IN LISTS _vs_ndk_cands)
+        foreach(_tag darwin-arm64 darwin-x86_64 linux-x86_64 windows-x86_64)
+            if(EXISTS "${_ndk}/toolchains/llvm/prebuilt/${_tag}/sysroot/usr/include/android/choreographer.h")
+                set(_vs_inc "${_ndk}/toolchains/llvm/prebuilt/${_tag}/sysroot/usr/include")
+            endif()
+        endforeach()
+        if(NOT _vs_inc AND EXISTS "${_ndk}/sysroot/usr/include/android/choreographer.h")
+            set(_vs_inc "${_ndk}/sysroot/usr/include")
+        endif()
+        if(_vs_inc)
+            break()
+        endif()
+    endforeach()
+    if(_vs_inc)
+        add_executable(nvn_vsync_test tests/nvn_vsync_test.c native/nvn/nvn_vsync_android.c)
+        target_include_directories(nvn_vsync_test PRIVATE native ../runtime/include)
+        target_compile_options(nvn_vsync_test PRIVATE -Wall -Wextra -Werror -DS2A_VSYNC_TEST "-idirafter" "${_vs_inc}")
+        target_link_libraries(nvn_vsync_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+        add_test(NAME android_nvn_vsync COMMAND nvn_vsync_test)
+    else()
+        # 缺 NDK：显式登记跳过（CTest 报 Skipped），不假绿；设 ANDROID_NDK_HOME 后重配即恢复。
+        message(WARNING "android_nvn_vsync 跳过：找不到 NDK android/choreographer.h（ANDROID_NDK_HOME / SDK ndk/<ver>）")
+        add_test(NAME android_nvn_vsync COMMAND "${CMAKE_COMMAND}" -E echo "SKIP: 缺 Android NDK sysroot，设 ANDROID_NDK_HOME 后重配")
+        set_tests_properties(android_nvn_vsync PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+    endif()
+    add_executable(input_latch_test tests/input_latch_test.c native/input.c)
+    target_include_directories(input_latch_test PRIVATE native)
+    target_compile_options(input_latch_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(input_latch_test PRIVATE Threads::Threads)
+    add_test(NAME android_input_latch COMMAND input_latch_test)
+    add_executable(keyboard_owner_test w4-tests/keyboard_owner_test.c native/host_ui.c native/host_ui_android.c)
+    target_include_directories(keyboard_owner_test PRIVATE native ../runtime/include)
+    target_compile_options(keyboard_owner_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(keyboard_owner_test PRIVATE Threads::Threads)
+    add_test(NAME android_keyboard_owner COMMAND keyboard_owner_test)
+    # host_android.c 用 sys/eventfd.h、wsi_lease.c 用 pthread_condattr_setclock
+    # ——Linux 专属：同一门，非 Linux 宿主不建不静默当绿。
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(host_android_test tests/host_android_test.c native/host_android.c native/hostapi.c native/screen_metrics.c native/input.c native/wsi_lease.c native/host_ui.c native/host_ui_android.c)
+        target_include_directories(host_android_test PRIVATE native ../runtime/include)
+        target_compile_options(host_android_test PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(host_android_test PRIVATE Threads::Threads)
+        add_test(NAME android_host_android COMMAND host_android_test)
+    endif()
+    # 宿主 plat_test 不跑 JNI/WSI 探针（JNI 探针随诊断 Activity 一起移除）。
+    # 源里含 native/memory.c（mremap 是 Linux 专属）：与 s2arm_android_memory 同一门，
+    # 非 Linux 宿主不建——跳过由 test.sh 报「未测」，不静默当绿。
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(plat_test tests/plat_test.c native/plat_android.c native/guest_signal.c native/redlog.c native/memory.c
+            native/direct/selection.c native/direct/attempt.c native/direct/graphics.c native/direct/json.c
+            native/direct/sha256.c native/direct/s2a_direct_abi.c
+            # 应用池 s2a_app_pool：plat_android.c 的 layout_android.inc 经 S2A_HEAP_DEFAULT 读它
+            ../runtime/src/layout.c)
+        target_include_directories(plat_test PRIVATE native tests/hostvk ../runtime/include)
+        set_source_files_properties(native/memory.c PROPERTIES COMPILE_DEFINITIONS _GNU_SOURCE)
+        target_compile_definitions(plat_test PRIVATE S2A_UNIT_TEST)
+        target_compile_options(plat_test PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(plat_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+        add_test(NAME android_plat COMMAND plat_test)
+    endif()
+    # Android fatal 处理器收尾（写 fatal 行后恢复处置、同步故障重放 / SIGABRT 重 raise）：宿主单测，不需要设备。
+    add_executable(crash_android_fatal_test ../runtime/tests/t_crash_android_fatal.c)
+    target_include_directories(crash_android_fatal_test PRIVATE ../runtime/include ../runtime/src)
+    target_compile_options(crash_android_fatal_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_crash_android_fatal COMMAND crash_android_fatal_test)
+    add_executable(fps_provider_test tests/fps_provider_test.c native/fps_provider.c)
+    target_compile_options(fps_provider_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+    target_link_libraries(fps_provider_test PRIVATE Threads::Threads)
+    add_test(NAME android_fps_provider COMMAND fps_provider_test)
+    # #48 D2：真 fps.c + 真 fps_provider.c，VM 边界按安卓模块布局（键页私有、数据段共享）做替身
+    add_executable(fps_table_android_test tests/fps_table_android_test.c ../runtime/src/fps.c native/fps_provider.c)
+    target_compile_definitions(fps_table_android_test PRIVATE S2A_UNIT_TEST _GNU_SOURCE)
+    target_include_directories(fps_table_android_test PRIVATE native ../runtime/include)
+    target_compile_options(fps_table_android_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+    target_link_libraries(fps_table_android_test PRIVATE Threads::Threads m)
+    add_test(NAME android_fps_table COMMAND fps_table_android_test)
+    # Linux host regression: real production SVC + real page protections; the
+    # thread/tracker boundaries are explicit test providers, not GPU evidence.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(fps_write_integration_test tests/fps_write_integration_test.c ../runtime/src/svc_mem.c
+                       ../runtime/src/layout.c ../graphics/track/track.c native/runtime/tracking/platform.c
+                       native/runtime/vm/backing.c native/runtime/tracking/runtime.c native/runtime/tracking/registry.c native/plat_android.c native/memory.c)
+        target_compile_definitions(fps_write_integration_test PRIVATE S2A_UNIT_TEST _GNU_SOURCE)
+        target_include_directories(fps_write_integration_test PRIVATE native ../runtime/include ../runtime/src)
+        target_compile_options(fps_write_integration_test PRIVATE -Wall -Wextra -Werror -UNDEBUG -ffunction-sections -fdata-sections)
+        target_link_options(fps_write_integration_test PRIVATE -Wl,--gc-sections)
+        target_link_libraries(fps_write_integration_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+        add_test(NAME android_fps_write_integration COMMAND fps_write_integration_test)
+        set_tests_properties(android_fps_write_integration PROPERTIES TIMEOUT 130)
+        add_executable(guest_page_test tests/guest_page_test.c ../runtime/src/svc_mem.c native/runtime/tracking/platform.c
+                       native/runtime/vm/backing.c ../runtime/src/det.c ../runtime/src/layout.c native/plat_android.c native/memory.c)
+        # svc_mem.c 的 __ANDROID__ 是「走安卓平台实现」（plat_vm_alias / 跟踪运行时），本测试正是链 plat_android.c 测这条路；
+        # det.c 按「苹果 / Linux × aarch64 / x86_64」自己选，不冒充安卓（冒充后 x86_64 宿主走进 aarch64 寄存器分支，#1082）
+        set_source_files_properties(../runtime/src/svc_mem.c PROPERTIES COMPILE_DEFINITIONS "__ANDROID__;S2A_UNIT_TEST;_GNU_SOURCE")
+        set_source_files_properties(../runtime/src/det.c PROPERTIES COMPILE_DEFINITIONS "S2A_UNIT_TEST;_GNU_SOURCE")
+        target_compile_definitions(guest_page_test PRIVATE S2A_UNIT_TEST S2A_PAGE_TEST_REAL_DET)
+        target_include_directories(guest_page_test PRIVATE native ../runtime/include ../runtime/src)
+        target_compile_options(guest_page_test PRIVATE -Wall -Wextra -Werror -UNDEBUG -ffunction-sections -fdata-sections)
+        target_link_options(guest_page_test PRIVATE -Wl,--gc-sections)
+        target_link_libraries(guest_page_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+        add_test(NAME android_guest_page COMMAND guest_page_test)
+        set_tests_properties(android_guest_page PROPERTIES SKIP_RETURN_CODE 77)
+        add_executable(alias_poison_test tests/alias_poison_test.c native/runtime/tracking/platform.c native/plat_android.c)
+        target_compile_definitions(alias_poison_test PRIVATE S2A_UNIT_TEST _GNU_SOURCE)
+        target_include_directories(alias_poison_test PRIVATE ../runtime/include ../graphics/track ../ ../platform)
+        target_compile_options(alias_poison_test PRIVATE -Wall -Wextra -Werror -ffunction-sections -fdata-sections)
+        target_link_options(alias_poison_test PRIVATE -Wl,--gc-sections -Wl,--wrap=plat_vm_alias -Wl,--wrap=munmap)
+        target_link_libraries(alias_poison_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+        add_test(NAME android_alias_poison COMMAND alias_poison_test)
+    endif()
+    add_executable(pcm_ring_test tests/pcm_ring_test.c native/pcm_ring.c)
+    target_include_directories(pcm_ring_test PRIVATE native)
+    target_compile_options(pcm_ring_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(pcm_ring_test PRIVATE Threads::Threads)
+    add_test(NAME android_pcm_ring COMMAND pcm_ring_test)
+    # Fake only the Android API; compile and exercise the production audio sink.
+    add_executable(aaudio_format_test tests/aaudio_format_test.c native/aaudio_sink.c native/pcm_ring.c)
+    target_include_directories(aaudio_format_test PRIVATE tests/aaudio_stubs native)
+    target_compile_options(aaudio_format_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+    add_test(NAME android_aaudio_format COMMAND aaudio_format_test)
+    # ADPF's Android API/clock/thread IDs are the only fake boundary.
+    add_executable(adpf_hint_test tests/adpf_hint_test.c native/adpf_hint.c native/system_tuning.c)
+    target_include_directories(adpf_hint_test PRIVATE native)
+    target_compile_definitions(adpf_hint_test PRIVATE S2A_ADPF_TEST)
+    target_compile_options(adpf_hint_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(adpf_hint_test PRIVATE Threads::Threads)
+    add_test(NAME android_adpf_hint COMMAND adpf_hint_test)
+    # Adreno GPU 提频。用模拟时间线和 KGSL 观测独立判定。
+    add_executable(gpu_turbo_policy_test tests/gpu_turbo_policy_test.c)
+    target_include_directories(gpu_turbo_policy_test PRIVATE native)
+    target_compile_options(gpu_turbo_policy_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_gpu_turbo_policy COMMAND gpu_turbo_policy_test)
+    add_executable(gpu_turbo_test tests/gpu_turbo_test.c native/gpu_turbo.c native/system_tuning.c)
+    target_include_directories(gpu_turbo_test PRIVATE native)
+    target_compile_definitions(gpu_turbo_test PRIVATE S2A_GPU_TURBO_TEST)
+    target_compile_options(gpu_turbo_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(gpu_turbo_test PRIVATE Threads::Threads)
+    add_test(NAME android_gpu_turbo COMMAND gpu_turbo_test)
+    # wsi_lease.c 用 pthread_condattr_setclock（Linux 专属）：同一门。
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(wsi_lease_test tests/wsi_lease_test.c native/wsi_lease.c)
+        target_include_directories(wsi_lease_test PRIVATE native)
+        target_compile_options(wsi_lease_test PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(wsi_lease_test PRIVATE Threads::Threads)
+        add_test(NAME android_wsi_lease COMMAND wsi_lease_test)
+    endif()
+    # C0：direct ABI 布局/校验/NVN 风格调用。ARM64 真机探针由 tools/direct_abi_check.sh
+    # 用同一份源编译；这里只证明主机 LP64 与头文件一致，不能代替 ARM64。
+    add_executable(direct_abi_test tests/direct_abi_test.c native/direct/s2a_direct_abi.c)
+    target_include_directories(direct_abi_test PRIVATE native ../runtime/include)
+    target_compile_options(direct_abi_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_direct_abi COMMAND direct_abi_test)
+    # C1：严格 JSON / graphics 描述 / attempt 持久锁 / 选择事务。
+    add_executable(direct_json_test tests/direct_json_test.c native/direct/json.c)
+    target_include_directories(direct_json_test PRIVATE native ../runtime/include)
+    target_compile_options(direct_json_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(direct_json_test PRIVATE m)
+    add_test(NAME android_direct_json COMMAND direct_json_test)
+    add_executable(direct_graphics_test tests/direct_graphics_test.c
+        native/direct/graphics.c native/direct/json.c native/direct/sha256.c native/direct/s2a_direct_abi.c)
+    target_include_directories(direct_graphics_test PRIVATE native ../runtime/include)
+    target_compile_options(direct_graphics_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(direct_graphics_test PRIVATE m)
+    add_test(NAME android_direct_graphics COMMAND direct_graphics_test)
+    add_executable(direct_attempt_test tests/direct_attempt_test.c native/direct/attempt.c native/direct/json.c)
+    target_include_directories(direct_attempt_test PRIVATE native ../runtime/include)
+    target_compile_definitions(direct_attempt_test PRIVATE S2A_DIRECT_TEST_FAULTS=1)
+    target_compile_options(direct_attempt_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(direct_attempt_test PRIVATE m)
+    add_test(NAME android_direct_attempt COMMAND direct_attempt_test)
+    # selection.c 用 getrandom（Linux 专属）：同一门。
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(direct_selection_test tests/direct_selection_test.c
+            native/direct/selection.c native/direct/attempt.c native/direct/graphics.c
+            native/direct/json.c native/direct/sha256.c native/direct/s2a_direct_abi.c)
+        target_include_directories(direct_selection_test PRIVATE native ../runtime/include)
+        target_compile_definitions(direct_selection_test PRIVATE S2A_DIRECT_TEST_FAULTS=1)
+        target_compile_options(direct_selection_test PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(direct_selection_test PRIVATE m)
+        add_test(NAME android_direct_selection COMMAND direct_selection_test)
+    endif()
+    # #274：direct-vulkan.txt 唯一解析；就绪 / AUTO / 解析三处同一结论，AUTO 回通用点名文件，attempt 标记。
+    add_executable(direct_choice_test tests/direct_choice_test.c native/direct_choice.c)
+    target_include_directories(direct_choice_test PRIVATE native)
+    target_compile_options(direct_choice_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_direct_choice
+        COMMAND direct_choice_test "${CMAKE_CURRENT_SOURCE_DIR}/native/direct_session.c")
+    # F4.1：编译诊断只能写私有目录；安装 revision 的逐文件清单/摘要前后不变。
+    add_executable(direct_diag_test tests/direct_diag_test.c native/direct/diag.c native/direct/sha256.c)
+    add_executable(direct_program_cache_test tests/direct_program_cache_test.c
+        native/direct/program_cache.c native/direct/sha256.c)
+    target_include_directories(direct_program_cache_test PRIVATE native ../runtime/include)
+    target_compile_definitions(direct_program_cache_test PRIVATE _GNU_SOURCE S2A_DIRECT_TEST_FAULTS)
+    target_compile_options(direct_program_cache_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(direct_program_cache_test PRIVATE pthread)
+    add_test(NAME android_direct_program_cache COMMAND direct_program_cache_test)
+    # F5.3：安装 revision 的只读离线库消费（命中/缺失/改名/截断/链接/只读 revision）。
+    add_executable(direct_offline_library_test tests/direct_offline_library_test.c
+        native/direct/offline_library.c native/direct/program_cache.c native/direct/sha256.c)
+    target_include_directories(direct_offline_library_test PRIVATE native ../runtime/include)
+    target_compile_definitions(direct_offline_library_test PRIVATE _GNU_SOURCE)
+    target_compile_options(direct_offline_library_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(direct_offline_library_test PRIVATE pthread)
+    add_test(NAME android_direct_offline_library COMMAND direct_offline_library_test)
+    # #1434：LibPack（iOS 同容器）POSIX 段读器 + _b.json→s2a-direct-program-v1 适配。
+    add_executable(libpack_vk_test tests/libpack_vk_test.c
+        native/direct/libpack_vk.c native/direct/json.c native/direct/jv.c native/nvn/nvn_vk_program_result.c)
+    target_include_directories(libpack_vk_test PRIVATE native native/direct native/nvn ../runtime/include)
+    target_compile_definitions(libpack_vk_test PRIVATE _GNU_SOURCE)
+    target_compile_options(libpack_vk_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_libpack_vk COMMAND libpack_vk_test)
+    # W2.6：编译 provider 的登记身份——同指针幂等、换指针拒绝、Activate 冻结、销毁解绑、表满不覆盖。
+    add_executable(direct_compiler_bind_test tests/direct_compiler_bind_test.c native/direct/compiler_bind.c)
+    target_include_directories(direct_compiler_bind_test PRIVATE native ../runtime/include)
+    target_compile_options(direct_compiler_bind_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(direct_compiler_bind_test PRIVATE pthread)
+    add_test(NAME android_direct_compiler_bind COMMAND direct_compiler_bind_test)
+    target_include_directories(direct_diag_test PRIVATE native ../runtime/include)
+    target_compile_options(direct_diag_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_direct_diag COMMAND direct_diag_test)
+    # F4.3：查找/编译共用完整规范输入的身份编码（含 constantBufferUse 反例）。
+    # input_identity 的纹理事实走 texture_facts.c 的定长索引映射（F4.2B），必须一起链接。
+    add_executable(direct_input_identity_test tests/direct_input_identity_test.c
+        native/direct/input_identity.c native/direct/texture_facts.c native/direct/sha256.c)
+    target_include_directories(direct_input_identity_test PRIVATE native ../runtime/include
+        ../graphics/nvn/gfx/nvn/include)
+    target_compile_options(direct_input_identity_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_direct_input_identity COMMAND direct_input_identity_test)
+    # F4.2A/F4.3：源快照的完整内容摘要、短 key 一致性、按代际 pin/release。
+    add_executable(direct_source_store_test tests/direct_source_store_test.c
+        native/direct/source_store.c native/direct/sha256.c)
+    target_include_directories(direct_source_store_test PRIVATE native ../runtime/include)
+    # 宿主夹具用小的 pinned 额外槽位跑“全 pin 后 keep 失败”，生产默认 16384；
+    # 字节安全阀用 96 MiB 跑“活 program 占满软预算后仍收、到安全阀才失败”，生产默认 512 MiB（宿主夹具不必真填 512 MiB）。
+    target_compile_definitions(direct_source_store_test PRIVATE S2A_SOURCE_MAX_PINNED=64 S2A_SOURCE_HARD_BYTES=100663296u)
+    target_compile_options(direct_source_store_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(direct_source_store_test PRIVATE Threads::Threads)
+    add_test(NAME android_direct_source_store COMMAND direct_source_store_test)
+    # #1403：图形 storage buffer 的编译结果 provenance（nvnSlot / uboSlot / uboPtr / rw）
+    # 与负控；原样链接生产 parser，不另写模型。
+    # compute storage 地址来源解析（NVN / UBO_PTR / UBO_ADDRESS + 来源反例 + supportReads/c0Reads null）
+    add_executable(direct_nvn_compute_storage_test tests/direct_nvn_compute_storage_test.c
+        native/nvn/nvn_vk_program_result.c native/direct/json.c native/direct/jv.c)
+    target_include_directories(direct_nvn_compute_storage_test PRIVATE native native/direct native/nvn
+        ../graphics/nvn/gfx/nvn)
+    target_compile_options(direct_nvn_compute_storage_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_direct_nvn_compute_storage COMMAND direct_nvn_compute_storage_test)
+    add_executable(direct_nvn_program_result_test tests/direct_nvn_program_result_test.c
+        native/nvn/nvn_vk_program_result.c native/direct/json.c native/direct/jv.c)
+    target_include_directories(direct_nvn_program_result_test PRIVATE native native/direct native/nvn)
+    target_compile_options(direct_nvn_program_result_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_direct_nvn_program_result COMMAND direct_nvn_program_result_test)
+    # READY 的 GPU 身份行：direct provider 必须打与 generic 同语义的真实设备行。
+    add_executable(direct_vk_identity_test tests/direct_vk_identity_test.c native/direct/vk_identity.c)
+    target_include_directories(direct_vk_identity_test PRIVATE native native/direct)
+    target_compile_options(direct_vk_identity_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_direct_vk_identity COMMAND direct_vk_identity_test)
+    # §8.5.11：驱动管线缓存落盘/恢复的文件层（UUID/版本隔离、损坏拒绝、原子覆盖）。
+    add_executable(direct_nvn_driver_cache_test tests/direct_nvn_driver_cache_test.c
+        native/nvn/nvn_vk_driver_cache.c native/direct/sha256.c)
+    target_include_directories(direct_nvn_driver_cache_test PRIVATE native native/direct native/nvn)
+    target_compile_options(direct_nvn_driver_cache_test PRIVATE -Wall -Wextra -Werror -D_GNU_SOURCE)
+    add_test(NAME android_direct_nvn_driver_cache COMMAND direct_nvn_driver_cache_test)
+    # F4.2B：NVN 纹理格式/目标 → 编译器 TextureFormat/SamplerType（未映射一律拒绝）。
+    add_executable(direct_texture_facts_test tests/direct_texture_facts_test.c native/direct/texture_facts.c)
+    target_include_directories(direct_texture_facts_test PRIVATE native ../runtime/include
+        ../graphics/nvn/gfx/nvn/include)
+    target_compile_options(direct_texture_facts_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_direct_texture_facts COMMAND direct_texture_facts_test)
+    # 游戏 sdk 模块里的 SDK 主版本 / 自带驱动 NVN API 版本在安卓上的强定义（与苹果共用 nvn_drvinfo.inc）。
+    add_executable(nvn_drvinfo_android_test tests/nvn_drvinfo_android_test.c native/nvn/nvn_drvinfo_android.c)
+    target_include_directories(nvn_drvinfo_android_test PRIVATE .. ../runtime/include)
+    target_compile_options(nvn_drvinfo_android_test PRIVATE -Wall -Wextra -UNDEBUG)
+    add_test(NAME android_nvn_drvinfo COMMAND nvn_drvinfo_android_test)
+    # F4.4：有界需求编译 worker（去重/单槽/pause/Stop/超时/重启）。
+    add_executable(direct_compile_worker_test tests/direct_compile_worker_test.c native/direct/compile_worker.c)
+    target_include_directories(direct_compile_worker_test PRIVATE native ../runtime/include)
+    target_compile_options(direct_compile_worker_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(direct_compile_worker_test PRIVATE Threads::Threads)
+    target_link_options(direct_compile_worker_test PRIVATE ${s2a_weak_u})
+    add_test(NAME android_direct_compile_worker COMMAND direct_compile_worker_test)
+    # 真实 worker + 受控线程调度：同 SHA 重新附着和旧等待者跨重启。
+    add_executable(direct_compile_worker_race_test tests/direct_compile_worker_race_test.c)
+    target_include_directories(direct_compile_worker_race_test PRIVATE native ../runtime/include)
+    target_compile_options(direct_compile_worker_race_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(direct_compile_worker_race_test PRIVATE Threads::Threads)
+    target_link_options(direct_compile_worker_race_test PRIVATE ${s2a_weak_u})
+    add_test(NAME android_direct_compile_worker_race COMMAND direct_compile_worker_race_test)
+    add_executable(nvn_first_use_test tests/nvn_first_use_test.c ../graphics/nvn/gfx/nvn/nvn_first_use.c)
+    target_include_directories(nvn_first_use_test PRIVATE ../graphics/nvn/gfx/nvn)
+    target_compile_options(nvn_first_use_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_nvn_first_use COMMAND nvn_first_use_test)
+    add_executable(direct_control_test tests/direct_control_test.c native/direct/control.c)
+    target_include_directories(direct_control_test PRIVATE native ../runtime/include)
+    target_compile_options(direct_control_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_direct_control COMMAND direct_control_test)
+    add_executable(ui_session_test tests/ui_session_test.c native/host_ui.c native/host_ui_android.c)
+    target_include_directories(ui_session_test PRIVATE native ../runtime/include)
+    target_compile_options(ui_session_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(ui_session_test PRIVATE pthread)
+    add_test(NAME android_ui_session COMMAND ui_session_test)
+    # 程序生命周期 pin 记账（与 hle_nvn.c 共用 header-only 实现）：去重、owner 拷贝、换 SetShaders、已释放 serial。
+    add_executable(nvn_program_pins_test tests/nvn_program_pins_test.c)
+    target_include_directories(nvn_program_pins_test PRIVATE ../graphics/nvn/gfx/nvn)
+    target_compile_options(nvn_program_pins_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_nvn_program_pins COMMAND nvn_program_pins_test)
+    # 呈现/窗口生命周期纯决策：无 surface、generation 变化、旋转重建、呈现退休预算。
+    add_executable(nvn_vk_lifecycle_test tests/nvn_vk_lifecycle_test.c native/nvn/nvn_vk_lifecycle.c)
+    target_include_directories(nvn_vk_lifecycle_test PRIVATE native/nvn)
+    target_compile_options(nvn_vk_lifecycle_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_nvn_vk_lifecycle COMMAND nvn_vk_lifecycle_test)
+    # AMediaCodec 解码边界（#44 第二刀）：假 codec 状态机喂编排出图，
+    # 验证开关门 / NV12 解交织 / 平面拷贝 / 裁剪 / 有界等待 / 失败粘性。
+    add_executable(mc_host_test tests/mc_host_test.c codecs/s2a_mc.c)
+    target_include_directories(mc_host_test PRIVATE tests/hostmc codecs)
+    target_compile_definitions(mc_host_test PRIVATE S2A_MC_TESTING=1)
+    target_compile_options(mc_host_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_mc_host COMMAND mc_host_test)
+    # NVNtextureView → Vulkan 子资源视图的纯决策（无 Vulkan 调用）：
+    # 3D depth slice 附件 2D 视图、array/cube 单层视图、越界仍准确拒绝。
+    add_executable(nvn_vk_texview_plan_test tests/nvn_vk_texview_plan_test.c)
+    target_include_directories(nvn_vk_texview_plan_test PRIVATE
+        native/nvn ../graphics/nvn/gfx/nvn ../graphics/nvn/gfx/nvn/include
+        tests/vkhost ../graphics/nvn/third_party/vulkan-headers/include)
+    target_compile_options(nvn_vk_texview_plan_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_nvn_vk_texview_plan COMMAND nvn_vk_texview_plan_test)
+    # #784 D2–D7 回放核心夹具（宿主，无 GPU）：.in/.exp 样例解析、格式往返、
+    # 字节级比对器（自比绿 / 翻一字节报位 / 截断报错）。D2–D7 后端拿它当契约回放。
+    add_executable(replay_fixture_test tests/replay_fixture/t_rfx.c tests/replay_fixture/rfx.c)
+    target_include_directories(replay_fixture_test PRIVATE tests/replay_fixture)
+    target_compile_options(replay_fixture_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_replay_fixture COMMAND replay_fixture_test
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/replay_fixture/samples")
+    # 金样可重现：rfx_gen 重出样例与提交的 samples/ 逐字节一致。
+    add_test(NAME android_replay_fixture_repro
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/replay_fixture/run_test.sh")
+endif()
+

@@ -1,0 +1,10 @@
+# 贡献者自检（tools/contrib_check.sh）不跑、留给维护者在列车里跑的第二层步骤：要我们的机器 / 测试 iPhone / 游戏文件 / 存档 / 金样录像 / gate-host。
+# 依据：10-23 空家目录普查（工具齐全、不给 ~/.s2arm/run 与 ~/.s2arm/data 下任何数据）逐个跑单测与钩子，下面这些仍红且原因是缺数据。
+# 列：步骤名（shell 通配，同门禁步骤名）	原因（写进 PR 摘要）	要的数据（空格分隔路径；本机全都在就照跑，跟列车同一份步骤，10-27 起；不写 = 一律不跑）
+单测 rewrite_apple_golden_test	要九款游戏主程序（~/.s2arm/data/<款>/exefs/main）	~/.s2arm/data/botw/exefs/main
+单测 openfonts_test	要本机生成的开源字体产物（~/.s2arm/run/s2arm/openfonts）	~/.s2arm/run/s2arm/openfonts
+单测 save_transfer_test	要自有真实存档、对应游戏身份及 G05 备份（S2A_SAVE_TRANSFER_SOURCE/GAME/MAC_ARCHIVE）
+钩子 graphics/gate.sh	要 GAL 金样录像与渲染器对拍数据（~/.s2arm/run/s2arm/replay）	~/.s2arm/run/s2arm/replay
+钩子 tests/visual/gate.sh	要宽屏金样 / 真值截图（~/.s2arm/run/s2arm/visual）	~/.s2arm/run/s2arm/visual
+设备单测 GameSessionLifecycleInstrumentation	Android API30+、真实游戏 APK 与私有 revision；入口 python3 android/tests/t_game_session_lifecycle.py --serial S --package P --title-id T --content-root R --artifact-sha256 H --test-apk APK --out NEW_DIR；缺前置 exit2，不代表通过
+iOS 全量编译	要一款游戏的改写产物（main.npdm + 改写映像；维护方在列车里跑，合成夹具接上前的短期登记）	~/.s2arm/run/s2arm/roots/acnh@现行

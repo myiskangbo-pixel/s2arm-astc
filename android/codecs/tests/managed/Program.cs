@@ -1,0 +1,394 @@
+using Ryujinx.Common.Logging;
+using Ryujinx.Graphics.Nvdec;
+using Ryujinx.Graphics.Nvdec.Android;
+using Ryujinx.Graphics.Nvdec.FFmpeg.H264;
+using Ryujinx.Graphics.Video;
+using System;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text.Json;
+
+static class Program
+{
+    static void Check(bool value, string message) { if (!value) throw new Exception(message); }
+    static H264PictureInfo Info(JsonElement m)
+    {
+        var p = m.GetProperty("picture_info");
+        uint U(string key) => p.TryGetProperty(key, out var v) ? v.GetUInt32() : 0;
+        bool B(string key) => U(key) != 0;
+        int I(string key) => p.TryGetProperty(key, out var v) ? v.GetInt32() : 0;
+        return new()
+        {
+            ChromaFormatIdc = (ushort)U("chroma_format_idc"), FrameMbsOnlyFlag = B("frame_mbs_only_flag"),
+            Direct8x8InferenceFlag = B("direct_8x8_inference_flag"), EntropyCodingModeFlag = B("entropy_coding_mode_flag"),
+            PicOrderPresentFlag = B("bottom_field_pic_order_in_frame_present_flag"),
+            Log2MaxFrameNumMinus4 = U("log2_max_frame_num_minus4"), PicOrderCntType = U("pic_order_cnt_type"),
+            Log2MaxPicOrderCntLsbMinus4 = U("log2_max_pic_order_cnt_lsb_minus4"),
+            NumRefIdxL0ActiveMinus1 = U("num_ref_idx_l0_default_active_minus1"), NumRefIdxL1ActiveMinus1 = U("num_ref_idx_l1_default_active_minus1"),
+            WeightedPredFlag = B("weighted_pred_flag"), WeightedBipredIdc = U("weighted_bipred_idc"),
+            PicInitQpMinus26 = I("pic_init_qp_minus26"), ChromaQpIndexOffset = I("chroma_qp_index_offset"), SecondChromaQpIndexOffset = I("second_chroma_qp_index_offset"),
+            DeblockingFilterControlPresentFlag = B("deblocking_filter_control_present_flag"), ConstrainedIntraPredFlag = B("constrained_intra_pred_flag"),
+            RedundantPicCntPresentFlag = B("redundant_pic_cnt_present_flag"), Transform8x8ModeFlag = B("transform_8x8_mode_flag"),
+            PicWidthInMbsMinus1 = (uint)(m.GetProperty("width").GetInt32() / 16 - 1), PicHeightInMapUnitsMinus1 = (uint)(m.GetProperty("height").GetInt32() / 16 - 1), NumRefFrames = 16,
+        };
+    }
+    static byte[] StripHeaders(ReadOnlySpan<byte> source)
+    {
+        using var result = new MemoryStream();
+        int start = -1, prefix = 0;
+        for (int i = 0; i < source.Length; i++)
+        {
+            int size = i + 3 < source.Length && source[i] == 0 && source[i + 1] == 0 && source[i + 2] == 0 && source[i + 3] == 1 ? 4 :
+                i + 2 < source.Length && source[i] == 0 && source[i + 1] == 0 && source[i + 2] == 1 ? 3 : 0;
+            if (size == 0) continue;
+            if (start >= 0 && (source[start + prefix] & 31) is not 7 and not 8) result.Write(source[start..i]);
+            start = i; prefix = size; i += size - 1;
+        }
+        if (start >= 0 && (source[start + prefix] & 31) is not 7 and not 8) result.Write(source[start..]);
+        return result.ToArray();
+    }
+    static unsafe string Hash(Plane plane, int width, int height, int stride)
+    {
+        using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        for (int row = 0; row < height; row++) sha.AppendData(new ReadOnlySpan<byte>((void*)(plane.Pointer + row * stride), width));
+        return Convert.ToHexStringLower(sha.GetHashAndReset());
+    }
+    static H264PictureInfo Basic() => new() { ChromaFormatIdc=1, FrameMbsOnlyFlag=true, PicWidthInMbsMinus1=19, PicHeightInMapUnitsMinus1=14 };
+    static void Contracts()
+    {
+        var info=Basic();
+        using IH264Decoder unavailable = new UnavailableH264Decoder();
+        using var surface = unavailable.CreateSurface(320,240);
+        byte[] guest = Enumerable.Repeat((byte)0xa5,4096).ToArray(); int writes=0;
+        for (int i=0;i<3;i++) if (unavailable.Decode(ref info,surface,new byte[]{0,0,1,0x65})) { writes++; guest[0]=0; }
+        Check(writes==0 && guest.All(x=>x==0xa5),"unavailable write guard");
+        using var vp8 = new AndroidVp8Decoder();
+        var vp8Info = new Vp8PictureInfo(); using var vp8Surface=vp8.CreateSurface(320,240);
+        Check(!vp8.Decode(ref vp8Info,vp8Surface,Array.Empty<byte>()),"Android VP8 loader boundary");
+        using var loader = new AvcH264Decoder();
+        using var output=loader.CreateSurface(320,240);
+        Check(!loader.Decode(ref info,output,new byte[]{0,0,1,0x65}),"missing native backend");
+        loader.Dispose(); loader.Dispose();
+        Check(output.YPlane.Pointer==0,"dispose detaches view");
+        info.PicOrderCntType=1; Check(!AvcH264Decoder.Supported(ref info),"POC type1 rejected");
+        info=Basic(); info.FieldPicFlag=true; Check(!AvcH264Decoder.Supported(ref info),"field rejected");
+        info=Basic(); info.ChromaFormatIdc=2; Check(!AvcH264Decoder.Supported(ref info),"422 rejected");
+        CallPath.Run(new UnavailableH264Decoder(),Basic(),new byte[]{0,0,1,0x65},false);
+        Console.WriteLine("PASS contracts; SENTINEL process continues after red+false");
+    }
+    static void Vectors(string directory, string emit)
+    {
+        foreach (string path in Directory.GetFiles(directory,"*.json").Order())
+        {
+            using var manifest=JsonDocument.Parse(File.ReadAllText(path)); var m=manifest.RootElement;
+            var info=CallPath.Metadata(Info(m)).Convert();
+            if(emit.Length==0)
+            {
+                byte[] work=new byte[512];
+                string hash=Convert.ToHexStringLower(SHA256.HashData(SpsAndPpsReconstruction.Reconstruct(ref info,work)));
+                Check(hash==m.GetProperty("reconstructed_headers_sha256").GetString(),"production header oracle identity");
+            }
+            int width=m.GetProperty("width").GetInt32(),height=m.GetProperty("height").GetInt32();
+            byte[] bytes=File.ReadAllBytes(Path.Combine(directory,m.GetProperty("file").GetString()!));
+            using var decoder=new AvcH264Decoder(); using var surface=decoder.CreateSurface(width,height);
+            if(emit.Length!=0) { byte[] work=new byte[512]; File.WriteAllBytes(Path.Combine(emit,Path.GetFileNameWithoutExtension(path)+".headers"),SpsAndPpsReconstruction.Reconstruct(ref info,work).ToArray()); info.ChromaQpIndexOffset++; info.SecondChromaQpIndexOffset++; File.WriteAllBytes(Path.Combine(emit,Path.GetFileNameWithoutExtension(path)+".pps-change"),SpsAndPpsReconstruction.Reconstruct(ref info,work).ToArray()); continue; }
+            using(var rawDecoder=new AvcH264Decoder())
+            using(var rawSurface=rawDecoder.CreateSurface(width,height))
+            {
+                var first=m.GetProperty("frames")[0];
+                Check(rawDecoder.Decode(ref info,rawSurface,bytes.AsSpan(first.GetProperty("offset").GetInt32(),first.GetProperty("length").GetInt32())),"inband equivalent SPS/PPS");
+            }
+            int index=0;
+            byte[][] aus=m.GetProperty("frames").EnumerateArray().Select(frame=>StripHeaders(bytes.AsSpan(frame.GetProperty("offset").GetInt32(),frame.GetProperty("length").GetInt32()))).ToArray();
+            if(width==320 && height==240)
+            {
+                var first=m.GetProperty("frames")[0];
+                CallPath.Run(new AvcH264Decoder(),info,StripHeaders(bytes.AsSpan(first.GetProperty("offset").GetInt32(),first.GetProperty("length").GetInt32())),true);
+            }
+            foreach(var frame in m.GetProperty("frames").EnumerateArray())
+            {
+                byte[] au=StripHeaders(bytes.AsSpan(frame.GetProperty("offset").GetInt32(),frame.GetProperty("length").GetInt32()));
+                Check(decoder.Decode(ref info,surface,au),Path.GetFileName(path)+" frame "+index);
+                string[] actual={Hash(surface.YPlane,width,height,surface.Stride),Hash(surface.UPlane,width/2,height/2,surface.UvStride),Hash(surface.VPlane,width/2,height/2,surface.UvStride)};
+                Check(actual.SequenceEqual(frame.GetProperty("reconstructed_planes_sha256").EnumerateArray().Select(x=>x.GetString()!)),"SHA "+path+" frame "+index);
+                index++;
+            }
+            // Warm the real path (including native DPB); measure only synchronous
+            // Decode over a second complete trajectory, without hash/test allocations.
+            foreach(byte[] au in aus) Check(decoder.Decode(ref info,surface,au),"warm decode");
+            long before=GC.GetAllocatedBytesForCurrentThread(); bool all=true;
+            foreach(byte[] au in aus) all &= decoder.Decode(ref info,surface,au);
+            long allocated=GC.GetAllocatedBytesForCurrentThread()-before;
+            Check(all && allocated==0,"steady Decode allocations="+allocated);
+            Console.WriteLine("PASS steady managed allocation=0 bytes for "+index+" calls");
+            decoder.Dispose(); Check(surface.YPlane.Pointer==0,"lifetime invalidation");
+            Console.WriteLine("PASS production reconstruction "+Path.GetFileName(path)+" frames="+index);
+            if(m.GetProperty("frames")[0].TryGetProperty("pps_changed_planes_sha256",out _))
+            {
+                using var ppsDecoder=new AvcH264Decoder(); using var ppsSurface=ppsDecoder.CreateSurface(width,height);
+                int i=0; var changing=info;
+                foreach(var frame in m.GetProperty("frames").EnumerateArray())
+                {
+                    if(i==4) { changing.ChromaQpIndexOffset++; changing.SecondChromaQpIndexOffset++; }
+                    Check(ppsDecoder.Decode(ref changing,ppsSurface,aus[i]),"PPS-only update");
+                    string[] hashes={Hash(ppsSurface.YPlane,width,height,ppsSurface.Stride),Hash(ppsSurface.UPlane,width/2,height/2,ppsSurface.UvStride),Hash(ppsSurface.VPlane,width/2,height/2,ppsSurface.UvStride)};
+                    Check(hashes.SequenceEqual(frame.GetProperty("pps_changed_planes_sha256").EnumerateArray().Select(x=>x.GetString()!)),"PPS changed oracle frame "+i);i++;
+                }
+                Console.WriteLine("PASS PPS-only change preserves DPB "+Path.GetFileName(path));
+            }
+        }
+    }
+    // Emits the canonical compressed-header cases hdrcmp.c replays through s2a_compressed_write —
+    // inputs printed once (pic line + muts line), both writers must produce identical bytes.
+    static void Vp9Hdr()
+    {
+        Vp9EntropyProbs def0 = Ryujinx.Graphics.Nvdec.Vp9.Decoder.DefaultProbs();
+        byte[] defs = MemoryMarshal.AsBytes(new[] { def0 }.AsSpan()).ToArray();
+        Console.WriteLine($"defaults {Convert.ToHexString(defs)}");
+        int[,] cases =
+        {
+            { 0, 0, 0, 0, 4, 2, 4, 1, 0, 1, 0 },   // inter tx=select ref=select compound sw-interp hp
+            { 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0 },   // inter tx=8x8-only single fixed-interp
+            { 0, 1, 0, 0, 2, 0, 4, 0, 0, 0, 0 },   // intra-only
+            { 1, 0, 0, 0, 4, 2, 4, 1, 1, 1, 0 },   // key frame (tx/ref/interp fields inert)
+            { 0, 0, 0, 1, 4, 0, 4, 0, 0, 0, 0 },   // inter lossless (tx literal omitted)
+        };
+        int[] muts = { 1230, 2960, 3016, 3021, 3030, 3050, 3080, 2984, 2990, 3000, 1005, 1180 };
+        for (int c = 0; c < cases.GetLength(0); c++)
+        {
+            var p = new Vp9NativeInput
+            {
+                Width = 64, Height = 32,
+                KeyFrame = cases[c, 0] != 0, IntraOnly = cases[c, 1] != 0, ErrorResilient = cases[c, 2] != 0,
+                Lossless = cases[c, 3] != 0, TxMode = cases[c, 4], ReferenceMode = cases[c, 5],
+                InterpFilter = cases[c, 6], AllowHighPrecisionMv = cases[c, 7] != 0,
+                SignBias1 = cases[c, 8], SignBias2 = cases[c, 9], SignBias3 = cases[c, 10],
+            };
+            byte[] probs = (byte[])defs.Clone();
+            for (int i = 0; i < muts.Length; i++)
+            {
+                int off = muts[i];
+                probs[off] = (byte)((probs[off] | 1) + 2);  // odd non-default targets where mv gates apply
+            }
+            Console.WriteLine($"case {c}");
+            Console.WriteLine("pic " + string.Join(',', Enumerable.Range(0, 11).Select(i => cases[c, i].ToString())));
+            Console.WriteLine("muts " + string.Join(' ', muts.Select(o => o.ToString())));
+            Span<byte> dst = stackalloc byte[Vp9CompressedHeader.MaxBytes];
+            int n = Vp9CompressedHeader.Write(in p, probs, defs, dst);
+            Console.WriteLine($"compressed {Convert.ToHexString(dst[..n].ToArray())}");
+            Console.WriteLine("end");
+        }
+    }
+
+    static unsafe void Vp9Mc()
+    {
+        // S2A_MC_FAKE_MODE 驱动 fixture dylib 的演出路径；验的是 IVp9NativeBackend 契约下
+        // McVp9Backend 的裁决（gated/回退/记账），不验像素（fixture 不是解码器）。
+        string mode=Environment.GetEnvironmentVariable("S2A_MC_FAKE_MODE") ?? "ok";
+        byte[] probs;
+        {
+            Vp9EntropyProbs fc = Ryujinx.Graphics.Nvdec.Vp9.Decoder.DefaultProbs();
+            probs = MemoryMarshal.AsBytes(new[] { fc }.AsSpan()).ToArray();
+            Check(probs.Length == McVp9Backend.ProbsSize, "default probs blob is 3087 bytes");
+            Check(probs[0] != 0, "default probs blob is populated");
+        }
+        byte[] au={0x12,0x34,0x56,0x78};
+        byte[] mvs=Enumerable.Repeat((byte)0xAA,128).ToArray();
+        byte[] counts=Enumerable.Repeat((byte)0xAA,McVp9Backend.CountsSize).ToArray();
+        var key=new Vp9NativeParams{IntraFrame=1,ShowFrame=1,Width=32,Height=16};
+        using McVp9Backend backend=McVp9Backend.TryCreate();
+        if(mode=="noprobe")
+        {
+            Check(backend==null,"noprobe: TryCreate null → factory falls to vpx");
+            Console.WriteLine("PASS vp9 selection boundary mode="+mode);return;
+        }
+        Check(backend!=null,"probe ok: backend created");
+        Vp9NativeResult RP(ReadOnlySpan<byte> pb,Vp9NativeParams p,out Vp9NativePicture pic,out string err)
+        {
+            Array.Fill(mvs,(byte)0xAA); Array.Fill(counts,(byte)0xAA);
+            return backend.Decode(au,pb,in p,ReadOnlySpan<byte>.Empty,mvs,counts,out pic,out err);
+        }
+        Vp9NativeResult R(Vp9NativeParams p,out Vp9NativePicture pic,out string err) => RP(probs,p,out pic,out err);
+        if(mode=="ok")
+        {
+            Check(R(key,out var pic,out var err)==Vp9NativeResult.Decoded,$"keyframe decodes: {err}");
+            Check(pic.Y!=0&&pic.Width==32&&pic.Height==16,"picture view populated");
+            Check(mvs.All(x=>x==0xAA),"mvsOut untouched — hardware produces none, nothing fabricated");
+            Check(counts.All(x=>x==0xAA),"countsOut untouched — hardware produces none, nothing fabricated");
+            var inter=key; inter.IntraFrame=0;
+            Check(R(inter,out _,out _)==Vp9NativeResult.Decoded,"inter frame decodes");
+            // 隐藏帧 / 越界尺寸：后端运行时事实判门，如实回退，不产出图。
+            var hidden=key; hidden.ShowFrame=0;
+            Check(R(hidden,out _,out _)==Vp9NativeResult.NotRepresentable,"hidden job not representable");
+            // 帧形语义（tx/ref/概率增量/use_prev）现在由真压缩头自带——后端不再判，
+            // 供给表任意都照样过（fixture 不读 probs，位流已携带）。
+            byte[] bad=(byte[])probs.Clone(); bad[2000]^=0xFF;
+            Check(RP(bad,key,out _,out _)==Vp9NativeResult.Decoded,"coef-region prob diff now encodable");
+            var txsel=inter; txsel.TxMode=4;
+            Check(R(txsel,out _,out _)==Vp9NativeResult.Decoded,"tx_mode_select carried by compressed header");
+            var txsel2=inter; txsel2.TxMode=1;
+            Check(R(txsel2,out _,out _)==Vp9NativeResult.Decoded,"allow_8x8 carried by compressed header");
+            var refsel=inter; refsel.ReferenceMode=2;
+            Check(R(refsel,out _,out _)==Vp9NativeResult.Decoded,"reference_mode_select carried by compressed header");
+            var prevmv=inter; prevmv.UsePrevFrameMvs=1;
+            Check(R(prevmv,out _,out _)==Vp9NativeResult.Decoded,"use_prev derived identically in-segment");
+            byte[] prevMvBuf=new byte[16];
+            Check(backend.Decode(au,probs,in prevmv,prevMvBuf,mvs,counts,out _,out _)==Vp9NativeResult.Decoded,"non-empty prevMvs same rule");
+            // 上游判门（Vp9CompressedHeader.Check）：规范压缩头里没有更新槽的段落，
+            // 或写不出的目标值，如实拦回托管——这才是「供给表≠默认表」的新裁决点。
+            var input=new Vp9NativeInput{Width=32,Height=16};
+            Check(Vp9CompressedHeader.Check(input,probs,probs)==null,"defaults pass check");
+            byte[] uv=(byte[])probs.Clone(); uv[1040]^=0xFF;      // uv_mode 段（无更新槽）
+            Check(Vp9CompressedHeader.Check(input,uv,probs)!=null,"uv_mode prob diff rejected");
+            byte[] coef=(byte[])probs.Clone(); coef[2000]^=0xFF; // coef 段（有更新槽）
+            Check(Vp9CompressedHeader.Check(input,coef,probs)==null,"coef prob diff expressible");
+            var inonly=input; inonly.IntraOnly=true;
+            byte[] ym=(byte[])probs.Clone(); ym[1010]^=0xFF;     // y_mode 段（intra-only 无更新槽）
+            Check(Vp9CompressedHeader.Check(inonly,ym,probs)!=null,"intra-only y_mode diff rejected");
+            var nocomp=input; nocomp.SignBias1=0; nocomp.SignBias2=0; nocomp.SignBias3=0;
+            nocomp.ReferenceMode=1;
+            Check(Vp9CompressedHeader.Check(nocomp,probs,probs)!=null,"compound ref without sign biases rejected");
+            nocomp.SignBias2=1;                                   // 有反向偏置 → compound 可写
+            Check(Vp9CompressedHeader.Check(nocomp,probs,probs)==null,"compound ref with sign biases expressible");
+            byte[] mv=(byte[])probs.Clone();                      // mv 概率只能写奇数目标
+            Check((probs[3021]&1)==0,"fixture default sign prob is even (128)");
+            mv[3021]=(byte)(probs[3021]^0x02);                    // 偶数非默认 → 写不出
+            Check(Vp9CompressedHeader.Check(input,mv,probs)!=null,"even mv prob target rejected");
+            mv[3021]=(byte)(probs[3021]|0x01);                    // 奇数目标 → 写得进
+            Check(Vp9CompressedHeader.Check(input,mv,probs)==null,"odd mv prob target expressible");
+            // 尺寸变化的非关键帧 → NeedsKeyFrame；关键帧则重建后照常解。
+            var resize=key; resize.IntraFrame=0; resize.Width=64; resize.Height=32;
+            Check(R(resize,out _,out _)==Vp9NativeResult.NeedsKeyFrame,"non-key resize needs keyframe");
+            resize.IntraFrame=1;
+            Check(R(resize,out var pic2,out _)==Vp9NativeResult.Decoded,"keyframe resize reconfigures");
+            Check(pic2.Width==64&&pic2.Height==32,"picture follows new size");
+            // 客体 MV 陈旧度状态机（Vp9Decoder.Decode 据此拦 use_prev 托管作业）：
+            // MC 产不出 MV 字段 → Decoded 后客体读缓冲陈旧；托管再解一帧（写真值）
+            // 或关键帧经过才恢复。
+            Check(!backend.ProducesGuestMetadata,"mc declares no guest metadata");
+            var mst=new Vp9NativePath.Vp9GuestMvState();
+            Check(!mst.Stale,"fresh state not stale");
+            mst.NoteNativeDecoded(false);
+            Check(mst.Stale,"mc-era decoded leaves guest MV stale");
+            mst.NoteNativeDecoded(false);
+            Check(mst.Stale,"stale persists across further mc decodes");
+            mst.NoteManagedDecoded();
+            Check(!mst.Stale,"managed decode re-establishes real MVs");
+            mst.NoteNativeDecoded(false);
+            mst.NoteKeyFrame();
+            Check(!mst.Stale,"key frame re-establishes (field resets)");
+            // 对拍基线：同样事件序列，vpx 语义（产真值）永不陈旧 → 托管照常接手。
+            var vst=new Vp9NativePath.Vp9GuestMvState();
+            vst.NoteNativeDecoded(true);
+            vst.NoteNativeDecoded(true);
+            Check(!vst.Stale,"vpx-era decodes leave guest MV real (baseline)");
+        }
+        if(mode=="pending")
+        {
+            // decode 不出图、wait 排空补齐：同一作业内 Decoded，不回退。
+            Check(R(key,out var pic,out var err)==Vp9NativeResult.Decoded,$"pending resolved via wait: {err}");
+            Check(pic.Y!=0,"pending resolved picture");
+        }
+        if(mode=="starve")
+        {
+            // 预算内补不齐：如实 NotRepresentable；连续三次升级 Error。
+            Check(R(key,out _,out _)==Vp9NativeResult.NotRepresentable,"starved job falls back");
+            Check(R(key,out _,out _)==Vp9NativeResult.NotRepresentable,"starved again");
+            Check(R(key,out _,out var err)==Vp9NativeResult.Error,"consecutive starvation escalates to Error");
+            Check(R(key,out _,out _)==Vp9NativeResult.Error,"starved backend stays sticky-failed");
+        }
+        if(mode=="createfail"||mode=="decodefail")
+        {
+            Check(R(key,out _,out var err)==Vp9NativeResult.Error,$"{mode} is Error: {err}");
+        }
+        if(mode=="latefail")
+        {
+            Check(R(key,out _,out var err)==Vp9NativeResult.Decoded,$"first frame ok: {err}");
+            Check(R(key,out _,out err)==Vp9NativeResult.Error,"mid-stream failure is Error");
+            Check(R(key,out _,out _)==Vp9NativeResult.Error,"failure is sticky");
+        }
+        // 中途回退上界（Vp9NativePath.Fallback）：同一解码上下文累计 MaxMidFallbacks 次
+        // 原生段进行中回退 → 整体 Disabled。只针对 ProducesGuestMetadata=false 的后端——
+        // 产不出客体 MV/计数才有「托管吃陈旧状态」的冻结；vpx 语义下托管接手精确，
+        // 同一事件序列不得停用（iOS/Mac 老行为是「到下一关键帧再激活」）。
+        // seg 关键帧必过激活再被 Check 拒——不触 ResourceManager，rm 用默认值即可。
+        {
+            NvdecRegisters state = new();
+            ResourceManager rm = default;
+            var pic = new Ryujinx.Graphics.Nvdec.Types.Vp9.PictureInfo { Flags = Ryujinx.Graphics.Nvdec.Types.Vp9.FrameFlags.IsKeyFrame };
+            pic.Seg.Enabled = 1;
+            Vp9PictureInfo info = new();
+            byte[] tiles = { 0 };
+            using var mc = new Vp9NativePath(new FakeBackend(false));
+            for (int i = 0; i < 3; i++)
+                Check(!mc.TryDecode(rm, ref state, ref pic, ref info, tiles), $"mc mid-fallback {i} goes managed");
+            Check(mc.Disabled, "no-metadata backend: 3 mid-fallbacks disable native for this context");
+            var vpxBackend = new FakeBackend(true);
+            using var vpx = new Vp9NativePath(vpxBackend);
+            for (int i = 0; i < 3; i++)
+                Check(!vpx.TryDecode(rm, ref state, ref pic, ref info, tiles), $"vpx mid-fallback {i} goes managed");
+            Check(!vpx.Disabled, "metadata backend: same sequence keeps next-keyframe reactivation");
+            Check(vpxBackend.Fallbacks == 3, "fallbacks still counted for the ledger");
+        }
+        Console.WriteLine("PASS vp9 selection boundary mode="+mode);
+    }
+    // IVp9NativeBackend fixture: Decode is unreachable from these tests (jobs fall back at Check).
+    sealed class FakeBackend : IVp9NativeBackend
+    {
+        public FakeBackend(bool guestMetadata) => ProducesGuestMetadata = guestMetadata;
+        public bool ProducesGuestMetadata { get; }
+        public bool NeedsCompressedHeader => false;
+        public int Fallbacks;
+        public Vp9NativeResult Decode(ReadOnlySpan<byte> frame, ReadOnlySpan<byte> probs, in Vp9NativeParams p,
+            ReadOnlySpan<byte> prevMvs, Span<byte> mvsOut, Span<byte> countsOut,
+            out Vp9NativePicture picture, out string error)
+        {
+            picture = default;
+            error = "fixture: Decode unreachable";
+            return Vp9NativeResult.Error;
+        }
+        public void NoteFallback(string reason) => Fallbacks++;
+        public void Dispose() { }
+    }
+    static void Reconfiguration(string directory)
+    {
+        using var small=JsonDocument.Parse(File.ReadAllText(Path.Combine(directory,"b-refs4.json")));
+        using var large=JsonDocument.Parse(File.ReadAllText(Path.Combine(directory,"b-720.json")));
+        var a=CallPath.Metadata(Info(small.RootElement)).Convert();var b=CallPath.Metadata(Info(large.RootElement)).Convert();
+        byte[] Input(JsonElement m,int i) { byte[] data=File.ReadAllBytes(Path.Combine(directory,m.GetProperty("file").GetString()!));var f=m.GetProperty("frames")[i];return StripHeaders(data.AsSpan(f.GetProperty("offset").GetInt32(),f.GetProperty("length").GetInt32())); }
+        using(var decoder=new AvcH264Decoder())
+        using(var old=decoder.CreateSurface(320,240))
+        using(var next=decoder.CreateSurface(1280,720))
+        {
+            Check(decoder.Decode(ref a,old,Input(small.RootElement,0)),"initial sequence");
+            Check(decoder.Decode(ref b,next,Input(large.RootElement,0)),"IDR resolution switch");
+            Check(old.YPlane.Pointer==0,"old view detached across IDR resize");
+            Check(!decoder.Decode(ref a,old,Input(small.RootElement,1)),"non-IDR resolution switch rejected");
+            Check(next.YPlane.Pointer==0,"failure detached previous view");
+        }
+        Console.WriteLine("PASS IDR resize, non-IDR change red+false, old view invalidated");
+    }
+    static int Main(string[] args)
+    {
+        try
+        {
+            string library=Environment.GetEnvironmentVariable("S2A_AVC_LIBRARY") ?? "";
+            string mclibrary=Environment.GetEnvironmentVariable("S2A_MC_LIBRARY") ?? "";
+            NativeLibrary.SetDllImportResolver(typeof(AvcH264Decoder).Assembly,(name,assembly,path)=>
+                name=="s2arm_android" ? (mclibrary.Length!=0 ? mclibrary : library).Length!=0 ? NativeLibrary.Load(mclibrary.Length!=0 ? mclibrary : library) : throw new DllNotFoundException("fixture: absent native backend") : 0);
+            if(args.Length>0 && args[0]=="baseline-ffmpeg")
+            {
+                using var baseline=new Ryujinx.Graphics.Nvdec.FFmpeg.H264.Decoder();
+                throw new Exception("baseline unexpectedly found FFmpeg");
+            }
+            if(args.Length>0 && args[0]=="vp9-hdr") Vp9Hdr();
+            else if(args.Length>0 && args[0]=="vp9") Vp9Mc();
+            else if(args.Length==0) Contracts(); else { Vectors(args[0],args.Length>1?args[1]:""); if(args.Length==1) Reconfiguration(args[0]); }
+            return 0;
+        }
+        catch(Exception error) { Console.Error.WriteLine(error); return 1; }
+        finally { Logger.Shutdown(); }
+    }
+}

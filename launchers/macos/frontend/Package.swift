@@ -1,0 +1,45 @@
+// swift-tools-version: 6.0
+import Foundation
+import PackageDescription
+
+// Sparkle 二进制包不在仓库里、要先备到 Vendor/（见下方 binaryTarget 注释）。没备时 SwiftPM 不报缺文件、直接崩成
+//   「-[NSNull length]: unrecognized selector」，看不出原因（11-14 新开工作树实测）：清单里先查，缺了就说清楚该跑什么
+let sparkleZip = "Vendor/Sparkle-2.10.1.zip"
+if !FileManager.default.fileExists(atPath: Context.packageDirectory + "/" + sparkleZip) {
+    fatalError("缺 launchers/macos/frontend/\(sparkleZip)：先在仓库根目录跑 python3 launchers/macos/sparkle_vendor.py（按钉死的校验值备 Sparkle，本机缓存有就拷）")
+}
+
+// NX2Apple 前端快照（来源、取用与改动见 UPSTREAM.md）。分层同上游 ARCHITECTURE.md：
+// NXCore（Foundation）→ NXModel（NXCore）→ NXLauncher（视图与样式）→ NX2AppleUI（上游 app target 里依赖 app 类型的视图，换成 S2Arm 适配层类型）。
+// 上游各 target 之间用 package 访问级别；对外（launchers/macos 的 S2ArmApple）只露 NX2AppleUI 的 public 入口。
+// 同上游：全部按 Swift 5 语言模式编（上游 Package.swift:5 记的两处并发问题未解）。
+let package = Package(
+    name: "NX2AppleFrontend",
+    platforms: [.macOS(.v13)],
+    products: [.library(name: "NX2AppleUI", targets: ["NX2AppleUI"]),
+               // 测试进程固定界面语言（Tests/TestLanguage/test_language.m）：本包与 launchers/macos 的每个测试目标都依赖它，测试结果不随跑测试那台机器的系统语言变
+               .library(name: "TestLanguage", targets: ["TestLanguage"])],
+    dependencies: [.package(path: "../adapter"), .package(path: "../../shared/SaveSync")],
+    targets: [
+        .target(name: "LauncherPadBridge", path: "Sources/LauncherPadBridge", publicHeadersPath: "include",
+                cSettings: [.headerSearchPath(".")],
+                linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("IOKit"), .linkedFramework("GameController")]),
+        .target(name: "NXCore", path: "Sources/NXCore"),
+        .target(name: "NXModel", dependencies: ["NXCore"], path: "Sources/NXModel"),
+        .target(name: "NXLauncher", dependencies: ["NXModel", "NXCore"], path: "Sources/NXLauncher"),
+        .target(name: "NX2AppleUI",
+                dependencies: ["NXLauncher", "NXModel", "NXCore", "LauncherPadBridge", .product(name: "S2ArmAppleAdapter", package: "adapter"),
+                               .product(name: "SaveSync", package: "SaveSync"), "Sparkle"],
+                path: "Sources/NX2Apple"),
+        // 应用内更新（v0.3.10 维护者拍板：换成业界标准的 Sparkle 2，不再自写换版）：上游 2.10.1 的 Sparkle-for-Swift-Package-Manager.zip，MIT 许可见 Vendor/Sparkle-LICENSE.txt。
+        //   zip 不进仓库（公开仓扫描不收二进制包，11-14），构建前 launchers/macos/sparkle_vendor.py 按钉死的 sha256 备到 Vendor/（本机缓存有就拷，没有才下一次）；
+        //   不用 URL 形式：那样每个新的出包工作目录都要现连 GitHub，v0.3.10 候选卡在下载 14 分钟。
+        //   build_app.py 把 Sparkle.framework 放进 Contents/Frameworks；S2ArmApple 的 rpath 指到那里（launchers/macos/Package.swift）
+        .binaryTarget(name: "Sparkle", path: sparkleZip),
+        // 界面语言跟随系统 / 记住选择的单测（tests/launcher_language_test.sh 跑；NXCore 是 package 访问级别，只能在本包里测）
+        .target(name: "TestLanguage", path: "Tests/TestLanguage"),
+        .testTarget(name: "NXCoreTests", dependencies: ["NXCore", "TestLanguage"], path: "Tests/NXCoreTests"),
+        .testTarget(name: "NXLauncherTests", dependencies: ["NXLauncher", "NX2AppleUI", "TestLanguage"], path: "Tests/NXLauncherTests"),
+    ],
+    swiftLanguageModes: [.v5]
+)
