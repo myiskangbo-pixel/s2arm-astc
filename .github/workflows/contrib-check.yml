@@ -67,7 +67,8 @@ jobs:
           "$PY" -m pip install --disable-pip-version-check \
             -r tools/rewriter-requirements.txt \
             -r pack/fonts/requirements.txt \
-            -r launchers/macos/requirements-runtime.txt
+            -r launchers/macos/requirements-runtime.txt \
+            ruff==0.17.1
           "$PY" runtime/rewriter/prepare_deps.py build/rewriter-deps
           # Full-tier contributor checks verify the pinned upstream Ryujinx
           # object; a full-history checkout of this fork does not contain it.
