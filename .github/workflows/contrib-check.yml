@@ -58,8 +58,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip install --disable-pip-version-check -r tools/rewriter-requirements.txt
-          python3 runtime/rewriter/prepare_deps.py build/rewriter-deps
+          # The gate and several tests intentionally use the repository's canonical
+          # contributor interpreter path; installing into setup-python's global
+          # interpreter alone leaves ~/.s2arm/venv missing.
+          mkdir -p "$HOME/.s2arm"
+          python3 -m venv "$HOME/.s2arm/venv"
+          PY="$HOME/.s2arm/venv/bin/python3"
+          "$PY" -m pip install --disable-pip-version-check \
+            -r tools/rewriter-requirements.txt \
+            -r pack/fonts/requirements.txt \
+            -r launchers/macos/requirements-runtime.txt
+          "$PY" runtime/rewriter/prepare_deps.py build/rewriter-deps
+          # Full-tier contributor checks verify the pinned upstream Ryujinx
+          # object; a full-history checkout of this fork does not contain it.
+          bash compat/fetch_base.sh
 
       - name: Verify self-check prerequisites
         shell: bash
@@ -78,8 +90,11 @@ jobs:
           CONTRIB_HOST: local
           CONTRIB_TIMEOUT_S: '900'
           S2A_GATE_LOAD_WAIT_S: '300'
+          S2A_PY: /Users/runner/.s2arm/venv/bin/python3
+          S2A_PYTHON: /Users/runner/.s2arm/venv/bin/python3
         run: |
           set -euo pipefail
+          export PATH="$HOME/.s2arm/venv/bin:$PATH"
           bash tools/contrib_check.sh \
             --base "${{ github.event.pull_request.base.sha }}" \
             --host local
