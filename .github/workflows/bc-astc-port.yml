@@ -1,0 +1,111 @@
+
+name: BC ASTC port validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'graphics/nvn/**'
+      - 'tools/toolchain.sh'
+      - 'tools/toolchain.env'
+      - '.github/workflows/bc-astc-port.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bc-astc-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable-tests:
+    name: Portable BC texture tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Build texture tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          make -C graphics/nvn/gfx/tex/tests \
+            t_bc_soft t_tex t_tex_layout
+
+      - name: Run BC transcode tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./graphics/nvn/gfx/tex/tests/t_bc_soft
+
+      - name: Run texture tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./graphics/nvn/gfx/tex/tests/t_tex
+          ./graphics/nvn/gfx/tex/tests/t_tex_layout
+
+  ios-metal-build:
+    name: iOS ARM64 Metal static library
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Inspect available Apple toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcodebuild -version
+          xcode-select -p
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --find clang
+          xcrun --find metal
+
+      - name: Resolve toolchain and build iOS NVN library
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source tools/toolchain.sh
+
+          echo "Selected Xcode: $DEVELOPER_DIR"
+          echo "iOS SDK: $S2A_TC_SDK"
+          echo "Metal compiler: $S2A_TC_METAL"
+          echo "Target iOS: $IPHONEOS_DEPLOYMENT_TARGET"
+
+          make -C graphics/nvn ios
+
+          test -s build/nvn/ios/libnvn.a
+
+          echo "iOS NVN static library generated successfully."
+
+      - name: Inspect generated static library
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LIB="build/nvn/ios/libnvn.a"
+
+          test -s "$LIB"
+
+          file "$LIB"
+
+          xcrun lipo -info "$LIB"
+
+          echo "Static library members:"
+          ar -t "$LIB" | sed -n '1,30p'
+
+      - name: Upload iOS NVN static library
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2arm-nvn-ios-bc-astc
+          path: build/nvn/ios/libnvn.a
+          if-no-files-found: error
+          retention-days: 14
