@@ -36,11 +36,13 @@ jobs:
             t_bc_soft t_tex t_tex_layout
 
       - name: Run BC transcode tests
+        shell: bash
         run: |
           set -euo pipefail
           ./graphics/nvn/gfx/tex/tests/t_bc_soft
 
       - name: Run texture tests
+        shell: bash
         run: |
           set -euo pipefail
           ./graphics/nvn/gfx/tex/tests/t_tex
@@ -89,12 +91,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          file build/nvn/ios/libnvn.a
-          xcrun --sdk iphoneos lipo -info \
-            build/nvn/ios/libnvn.a
+          LIB="build/nvn/ios/libnvn.a"
 
-          xcrun --sdk iphoneos ar -t \
-            build/nvn/ios/libnvn.a | head -30
+          test -s "$LIB"
+
+          file "$LIB"
+
+          xcrun lipo -info "$LIB"
+
+          echo "Static library members:"
+          ar -t "$LIB" | sed -n '1,30p'
 
       - name: Upload iOS NVN static library
         uses: actions/upload-artifact@v4
