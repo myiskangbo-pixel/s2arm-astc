@@ -49,7 +49,7 @@ s2a_cores() {
   local nc gb ln mj live
   # 出包整条链降优先级（子进程继承）：只往低调、不往高调（已更低的不动；调高要 root）。S2A_NICE 改档，0 = 不调
   local nv=${S2A_NICE:-10} cur; cur=$(ps -o nice= -p $$ 2> /dev/null | tr -d ' ')
-  [ "$nv" -gt "${cur:-0}" ] 2> /dev/null && renice "$nv" -p $$ > /dev/null 2>&1
+  [ "$nv" -gt 0 ] 2> /dev/null && [ "$nv" -gt "${cur:-0}" ] 2> /dev/null && renice "$nv" -p $ > /dev/null 2>&1
   nc=${S2A_NCPU:-$(getconf _NPROCESSORS_ONLN 2> /dev/null)}; [ "$nc" -ge 1 ] 2> /dev/null || { echo "【红】并行度：读不出本机核数（getconf _NPROCESSORS_ONLN）" >&2; return 1; }
   ln=${S2A_LANES:-1}; [ "$ln" -ge 1 ] 2> /dev/null || ln=1
   if [ -z "${S2A_JOBS:-}" ]; then
