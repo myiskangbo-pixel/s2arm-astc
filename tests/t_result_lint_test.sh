@@ -6,7 +6,7 @@
 #   ④ 共用宏真编真跑：bad=0 打「✓ t_demo：全过」退 0；bad=2 打「✗ t_demo：2 项不通」退 1
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0; trap 'rm -rf "$T"' EXIT
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
-o1=$(cd "$H" && python3 tools/t_result_lint.py 2>&1); r1=$?
+o1=$(cd "$H" && python3 tools/t_result_lint.py --base "${GATE_SCAN_BASE:-origin/main}" 2>&1); r1=$?
 ck "① 本支改到的单测都有结论行（rc=${r1}；$(tail -1 <<< "$o1")）" '[ $r1 = 0 ]'
 mkdir -p "$T/runtime/tests" "$T/graphics/nvn/tests/mk"; cd "$T" || exit 1
 printf 'int main(void){int bad=0; printf(bad ? "t_wb 有不通\\n" : "t_wb 全过\\n"); return bad;}\n' > runtime/tests/t_wb.c
