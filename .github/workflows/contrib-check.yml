@@ -90,11 +90,11 @@ jobs:
           CONTRIB_HOST: local
           CONTRIB_TIMEOUT_S: '900'
           S2A_GATE_LOAD_WAIT_S: '300'
-          S2A_PY: /Users/runner/.s2arm/venv/bin/python3
-          S2A_PYTHON: /Users/runner/.s2arm/venv/bin/python3
         run: |
           set -euo pipefail
           export PATH="$HOME/.s2arm/venv/bin:$PATH"
+          export S2A_PY="$HOME/.s2arm/venv/bin/python3"
+          export S2A_PYTHON="$S2A_PY"
           bash tools/contrib_check.sh \
             --base "${{ github.event.pull_request.base.sha }}" \
             --host local
