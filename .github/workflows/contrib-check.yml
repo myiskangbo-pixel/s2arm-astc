@@ -90,6 +90,7 @@ jobs:
           CONTRIB_HOST: local
           CONTRIB_TIMEOUT_S: '900'
           S2A_GATE_LOAD_WAIT_S: '300'
+          CONTRIB_BASE_RERUN: '1'
         run: |
           set -euo pipefail
           export PATH="$HOME/.s2arm/venv/bin:$PATH"
@@ -98,3 +99,16 @@ jobs:
           bash tools/contrib_check.sh \
             --base "${{ github.event.pull_request.base.sha }}" \
             --host local
+
+      - name: Upload contributor self-check diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contributor-self-check-${{ github.run_id }}
+          path: |
+            build/contrib_check/gate.log
+            build/contrib_check/base_gate.log
+            build/contrib_check/summary.md
+            build/contrib_check/gate_list.err
+          if-no-files-found: warn
+          retention-days: 14
