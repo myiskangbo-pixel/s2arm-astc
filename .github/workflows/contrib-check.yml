@@ -1,0 +1,85 @@
+name: Contributor pre-merge self-check
+
+on:
+  pull_request:
+    paths:
+      - 'pack/stage_inputs/shell.tsv'
+      - 'pack/shell/closure.py'
+      - 'tests/shell_csiblings_test.sh'
+      - 'tools/contrib_check.sh'
+      - 'tools/doctor.sh'
+      - 'tools/gate.sh'
+      - 'tools/gate_plan.sh'
+      - 'tools/gate_route.py'
+      - 'tools/gate_decl.py'
+      - 'tools/contrib_tools.tsv'
+      - 'tools/contrib_layer2.tsv'
+      - 'tools/idle_timeout.sh'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contrib-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  contributor-check:
+    name: Contributor self-check (macOS)
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout PR head and full history
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up .NET SDK 10.0.403
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.403'
+
+      - name: Install Bash 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list --versions bash >/dev/null 2>&1 || brew install bash
+          echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare pinned Python and rewriter dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -r tools/rewriter-requirements.txt
+          python3 runtime/rewriter/prepare_deps.py build/rewriter-deps
+
+      - name: Verify self-check prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash --version | head -1
+          python3 --version
+          dotnet --list-sdks
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --find metal
+
+      - name: Run contributor self-check against PR base
+        shell: bash
+        env:
+          CONTRIB_HOST: local
+          CONTRIB_TIMEOUT_S: '900'
+          S2A_GATE_LOAD_WAIT_S: '300'
+        run: |
+          set -euo pipefail
+          bash tools/contrib_check.sh \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --host local
