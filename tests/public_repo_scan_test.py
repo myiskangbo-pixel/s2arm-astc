@@ -292,12 +292,15 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(len(reverted['uncovered_blocking']), 2, 'removing registration must block both TARs')
 
     def test_synthetic_system_archive_is_verified_before_the_ci_scan(self):
-        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
-        linux = workflow.split('  linux:\n', 1)[1].split('  macos:\n', 1)[0]
+        # The contributor workflow is now the supported CI entry point. Its
+        # self-check invokes the public-repository scan, so verify the generated
+        # archive immediately before that command in the same job.
+        workflow = (ROOT / '.github/workflows/contrib-check.yml').read_text()
         verify = 'run: python3 tests/sysdata_synth_tar_test.py'
-        scan = 'run: python3 tools/public_repo_scan.py'
-        self.assertIn(verify, linux)
-        self.assertLess(linux.index(verify), linux.index(scan))
+        scan = 'bash tools/contrib_check.sh'
+        self.assertIn(verify, workflow)
+        self.assertIn(scan, workflow)
+        self.assertLess(workflow.index(verify), workflow.index(scan))
 
     def test_extensionless_text_is_scanned_without_values(self):
         mail = 'synthetic' + '@private.test'
