@@ -1,5 +1,6 @@
 # 共用模块接入矩阵例外登记：模块 <制表符> 理由 <制表符> 登记人 <制表符> 日期
 # 只登记「安卓明确不适用」的模块（苹果后端、宿主工具、安卓路由明确关闭的阶段）；能接没接的不是例外，进基线缺口。
+graphics/nvn/gfx/tex/nvn_bc_soft.c	NVN Metal CPU BC 解码回退，仅供不支持 BC 采样的 Apple GPU；Android Vulkan 使用 nvn_vk_bcdec.c，不消费 Metal 像素格式	D2R线	2026-11-24
 graphics/metal/cs/NxGal.csproj	Metal GAL 后端工程，安卓走 Vulkan 不接	dev-dari	2026-11-06
 graphics/metal/cs/caps/NxGalCaps.csproj	Metal 后端能力查询，苹果专用	dev-dari	2026-11-06
 graphics/metal/tools/gal_spvgen/gal_spvgen.csproj	Metal 管线 SPIR-V 宿主工具，苹果专用	dev-dari	2026-11-06
