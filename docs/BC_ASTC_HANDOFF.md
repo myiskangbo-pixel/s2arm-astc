@@ -135,3 +135,11 @@
 ## 7. 新对话开场提示
 
 请先读取本文件，再通过 GitHub 重新检查 `myiskangbo-pixel/s2arm-astc` 的最新状态。用户已授权 B 自主开发模式：允许在工作分支自主改代码、测试、commit、反复修复 CI；不得逐步询问。第一件事优先检查并修复 `tools/cores.sh` 中疑似误写的 `renice "$nv" -p $`，再解决当前贡献者自检红项和无结论项。最终目标不是仅 CI 变绿，而是交付可用 Windows x64 S2Arm BC-ASTC 工具包与完整 iOS IPA。
+
+## 2026-11-24 22:03 CST — repair checkpoint (supersedes older HEAD/status)
+
+- Prior handoff commit 4a594b60c6b2d24b2970e638c5f1602e8b948f7a: contributor run [45397806200](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45397806200) completed failure; BC ASTC run [45397805922](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45397805922) completed success. Detailed new failure classification still pending.
+- Committed PID correction in tools/cores.sh: 550b222c4bbd6c1b894aebb0ea87a92e80e39032. Restores literal shell PID expansion in renice; no tests weakened.
+- Committed pinned Ruff dependency in contributor workflow: 11f3a61167bc87387cf19bd215f9028e5975a99f. Installation and test results pending CI.
+- Observed workflow snapshot: [{"id":45410008739,"sha":"11f3a61167bc87387cf19bd215f9028e5975a99f","status":"queued","conclusion":null,"name":"BC ASTC port validation"},{"id":45410008281,"sha":"11f3a61167bc87387cf19bd215f9028e5975a99f","status":"queued","conclusion":null,"name":"Contributor pre-merge self-check"},{"id":45397806200,"sha":"4a594b60c6b2d24b2970e638c5f1602e8b948f7a","status":"completed","conclusion":"failure","name":"Contributor pre-merge self-check"},{"id":45397805922,"sha":"4a594b60c6b2d24b2970e638c5f1602e8b948f7a","status":"completed","conclusion":"success","name":"BC ASTC port validation"},{"id":45371346498,"sha":"13076da98865a5abddd512b2a79269251c4a2574","status":"completed","conclusion":"success","name":"BC ASTC port validation"},{"id":45371346488,"sha":"13076da98865a5abddd512b2a79269251c4a2574","status":"completed","conclusion":"failure","name":"Contributor pre-merge self-check"}]
+- Next: inspect latest contributor logs, confirm nice and Ruff tests, diagnose dev_run and Ryujinx patch check and missing conclusions. No Windows ZIP or IPA delivered; no new artifact hash verified. Continue actual Windows/macOS build integration after checks.
