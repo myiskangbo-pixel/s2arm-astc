@@ -85,6 +85,10 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-version
           xcrun --find metal
 
+      - name: Deterministic Ryujinx patch replay diagnosis
+        shell: bash
+        run: bash compat/replay_diagnose.sh "$GITHUB_SHA"
+
       - name: Verify generated synthetic system archive
         shell: bash
         run: python3 tests/sysdata_synth_tar_test.py
