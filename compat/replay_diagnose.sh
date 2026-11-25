@@ -52,7 +52,17 @@ while IFS= read -r f; do
     echo "INDEX_BLOBS_AT_FAILURE:"
     awk '/^diff --git /{print $4}' "$TMP/current.patch" | sed 's|^b/||' | while IFS= read -r path; do
       git ls-files -s -- "$path" || true
+      case "$path" in
+        src/Ryujinx.Common/Ryujinx.Common.csproj|src/Ryujinx.Common/Utilities/NetworkHelpers.cs)
+          echo "===== INDEX CONTENT BEFORE FAILED PATCH: $path ====="
+          git show ":$path" 2>&1 | nl -ba | sed -n '1,90p'
+          ;;
+      esac
     done
+    echo "===== FAILED PATCH HUNKS ====="
+    grep -n -A22 -B4 '^diff --git a/src/Ryujinx.Common/Ryujinx.Common.csproj' "$TMP/current.patch" || true
+    echo "===== EXPECTED BASE BLOBS FROM PATCH ====="
+    grep -E '^index ' "$TMP/current.patch" || true
     exit 1
   fi
   git apply --cached -p1 --whitespace=nowarn "$TMP/current.patch"
