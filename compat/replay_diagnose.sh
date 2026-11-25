@@ -39,6 +39,7 @@ export GIT_INDEX_FILE="$TMP/replay.idx"
 git read-tree "$PRISTINE"
 rd compat/patches/series | sed 's/#.*//; s/[[:space:]]*$//' | grep -v '^$' > "$TMP/series"
 n=0
+declare -A LAST_TOUCH=()
 while IFS= read -r f; do
   n=$((n+1))
   echo "REPLAY[$n] BEGIN $f"
@@ -59,6 +60,10 @@ while IFS= read -r f; do
           ;;
       esac
     done
+    echo "===== LAST SUCCESSFUL PATCH TOUCHING FAILED FILES ====="
+    while IFS= read -r path; do
+      printf 'LAST_TOUCH[%s]=%s\n' "$path" "${LAST_TOUCH[$path]:-NONE}"
+    done < <(awk '/^diff --git /{print $4}' "$TMP/current.patch" | sed 's|^b/||')
     echo "===== FAILED PATCH HUNKS ====="
     grep -n -A22 -B4 '^diff --git a/src/Ryujinx.Common/Ryujinx.Common.csproj' "$TMP/current.patch" || true
     echo "===== EXPECTED BASE BLOBS FROM PATCH ====="
@@ -66,6 +71,9 @@ while IFS= read -r f; do
     exit 1
   fi
   git apply --cached -p1 --whitespace=nowarn "$TMP/current.patch"
+  while IFS= read -r path; do
+    LAST_TOUCH["$path"]="$f"
+  done < <(awk '/^diff --git /{print $4}' "$TMP/current.patch" | sed 's|^b/||')
   TREE=$(git write-tree)
   echo "REPLAY[$n] OK $f TREE=$TREE"
 done < "$TMP/series"
