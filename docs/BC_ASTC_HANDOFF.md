@@ -253,3 +253,8 @@ Validated HEAD `60723ddffb62916f8d79a714fa9b8e0b7e80b731`, PR #2 open draft, bas
 - Compared the project file with the pinned upstream Ryujinx commit 475615f0431b4995b03c930c5089d20f6f3570e0 via the public mirror; the AnyCPU-only conditions are present upstream too. This is a build-environment property leak, not a source regression in BC-ASTC or the compatibility patches.
 - Repair: make launchers/windows/bundle_prepare_win.py::dotnet_publish explicitly pass -p:Platform=AnyCPU while retaining -r win-x64. This keeps managed project configuration aligned with the existing project property groups; the runtime identifier continues to select Windows x64 for self-contained/NativeAOT output. No test is removed and no gate is weakened.
 - Next verification: Windows bundle must pass romfs_index compilation, then build the remaining prebuilt tools, run bundled BC-ASTC DLL verification, synthetic RomFS → ASTC pack tests and iOS delivery-manifest tests, write checksums, and upload the full Windows x64 artifact. If it fails again, inspect the next first failure from the uploaded logs rather than assuming this fix is sufficient.
+
+## 2026-11-25 — deterministic LDN patch-series reconciliation
+- Preview workflow: https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45662896389
+- The reconciliation script removes the four overlapping LDN route/auto patches from the active series, generates one incremental patch from the remaining series to compat/tree, and runs compat/verify.sh before any commit.
+- The preview artifact includes the generated patch, superseded patch copies, updated series, manifest, tree diff, and focused dev_run logs. The patch is committed only if console, smoke, lag-heartbeat, and compatibility verification steps all succeed.
