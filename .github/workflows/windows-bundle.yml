@@ -65,6 +65,7 @@ jobs:
           export S2A_PY="$PWD/build/venv/bin/python3"
           export S2A_GMAKE="$PWD/build/macos/gmake/bin/make"
           "$S2A_PY" pack/fonts/make_open_fonts.py build/windows-inputs/Fonts
+          bash services/systemdata/make_tzdata.sh --prepare-sources
           bash services/systemdata/make_tzdata.sh --bundle-to build/windows-inputs/Tzdata
           bash pack/shell_build.sh build/windows-inputs/Shell
 
