@@ -160,3 +160,13 @@ Validated HEAD `60723ddffb62916f8d79a714fa9b8e0b7e80b731`, PR #2 open draft, bas
 - BC ASTC validation: https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45451119703 — success. Artifact 14947517790, 5059898 bytes, SHA256 43d5a0afd699e063c63be038aa9b58dd5a4898985f109687b8358de57c148f60, expires 2026-12-08T17:41:23Z.
 - Contributor self-check: https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45451119547 — failure, job 138648155188. 125 scheduled/executed, 118 green, 1 red, 6 missing conclusions. dev_run_test passed (543s); only Ryujinx patch check red, same red on base b9c184017, zero new reds; this is not a gate pass. Diagnostic artifact 14949139621, SHA256 fd3d5ca9acda5a58ac2092e2dee68cd09e762800945ae97351c617fce3b8681e, expires 2026-12-08T18:09:05Z.
 - Windows bundle CLI inspected: bundle_win.py target --shell --tzdata --fonts [--tv-shell]; shell manifest details.shellId must match engine identity. Next: inspect gate missing-result handling and compat patch verification, and establish macOS shell inputs and Windows bundle workflow without weakening checks. No Windows ZIP or IPA delivered; static library only.
+
+
+## 8. 2026-11-25：Ryujinx 补丁确定性重放诊断
+
+- 新增 `compat/replay_diagnose.sh`，提交：`7fa410d4fc82facdde730f3c3e9cc7b798137e4f`。
+- 更新 `.github/workflows/contrib-check.yml`，在自检主流程前执行 `bash compat/replay_diagnose.sh "$GITHUB_SHA"`；提交/当前 HEAD：`b79d1f8751d1f1a4990be6ebec04f62257e5eb04`。
+- 诊断脚本只读地从 `compat/UPSTREAM` 重建上游子树，使用临时 Git index 按 `compat/patches/series` 逐补丁执行 `git apply --cached --check`，每个成功补丁记录 tree SHA；在第一个失败补丁停止，输出错误、失败时 index 中的文件 blob SHA；若全部成功，再比较 EXPECT 与 `REV:compat/tree` 的 tree SHA。
+- 触发的 Contributor self-check：Run [45557437130](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45557437130)，Job ID `139012798025`。本次记录时仍为 in_progress，诊断步骤尚未运行完成；因此**尚无实验结论，不能宣称已定位首个失败补丁**。
+- 同一 HEAD 的 BC ASTC validation：Run [45557437237](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45557437237)，记录时 in_progress。
+- 当前实验目的：确定 series 中第一个无法应用的补丁，验证失败是否确为 `20261123-0820-ldn-dual-protocol-auto.patch`，并区分“首次补丁应用失败”与“全部补丁可应用但最终树 SHA 不一致”。不得未经日志证据调整 1140/0113 顺序或重写补丁。
