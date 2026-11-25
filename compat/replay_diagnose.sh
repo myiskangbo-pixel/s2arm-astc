@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Deterministic, read-only replay of compat/patches/series against compat/UPSTREAM.
 # Stops at the FIRST failing patch and records the reconstructed tree after each success.
-set -euo pipefail
+set -Eeuo pipefail
+trap 'rc=$?; echo "DIAG_SCRIPT_ERROR line=$LINENO rc=$rc command=$BASH_COMMAND" >&2; exit "$rc"' ERR
+set -x
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 REV="${1:-HEAD}"
@@ -26,9 +28,11 @@ while IFS=$'\t' read -r k p id mode; do
     *) printf '%s %s %s\t%s\n' "$mode" "$type" "$id" "$p" >> "$TMP/root.mk" ;;
   esac
 done < "$TMP/UPSTREAM"
-SRC_TREE=$(git mktree < "$TMP/src.mk")
+echo "SRC_MKTREE_INPUT_LINES=$(wc -l < "$TMP/src.mk")"
+SRC_TREE=$(git mktree < "$TMP/src.mk" 2>"$TMP/src-mktree.err") || { cat "$TMP/src-mktree.err" >&2; exit 3; }
 printf '040000 tree %s\tsrc\n' "$SRC_TREE" >> "$TMP/root.mk"
-PRISTINE=$(git mktree < "$TMP/root.mk")
+echo "ROOT_MKTREE_INPUT_LINES=$(wc -l < "$TMP/root.mk")"
+PRISTINE=$(git mktree < "$TMP/root.mk" 2>"$TMP/root-mktree.err") || { cat "$TMP/root-mktree.err" >&2; exit 3; }
 echo "UPSTREAM_COMMIT=$COMMIT"
 echo "PRISTINE_TREE=$PRISTINE"
 export GIT_INDEX_FILE="$TMP/replay.idx"
