@@ -216,3 +216,8 @@ Validated HEAD `60723ddffb62916f8d79a714fa9b8e0b7e80b731`, PR #2 open draft, bas
 - Added a Windows bundle workflow step to run both tests using the packaged Windows Python and the exact prebuilt BC-ASTC DLL. This upgrades Windows validation from “DLL exists and loads” to synthetic RomFS → ASTC pack generation/readback plus iOS delivery-manifest ordering.
 - Latest pre-change PR runs for parent HEAD were all `action_required` with zero jobs; the triggering commit author was `github-actions[bot]`, whereas the preceding successful compatibility run was triggered by `myiskangbo-pixel`. This strongly suggests the bot-authored patch-series commit hit a GitHub workflow-approval gate, but the exact repository approval setting is not exposed by the available read API. The next user-authored push is intended to verify whether normal CI execution resumes; do not bypass repository security policy.
 - Remaining evidence gaps: real iPhone/A16 texture hits and visual/memory validation; complete Windows bundle build/clean-machine smoke; actual game payload, unsigned IPA assembly, and external signing/side-load validation as applicable.
+
+## 2026-11-25 — deterministic LDN patch-series reconciliation
+- Preview workflow: https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45634544122
+- The reconciliation script removes the four overlapping LDN route/auto patches from the active series, generates one incremental patch from the remaining series to compat/tree, and runs compat/verify.sh before any commit.
+- The preview artifact includes the generated patch, superseded patch copies, updated series, manifest, tree diff, and focused dev_run logs. The patch is committed only if console, smoke, lag-heartbeat, and compatibility verification steps all succeed.
