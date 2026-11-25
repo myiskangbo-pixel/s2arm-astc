@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: compat-integrity-\${{ github.event.pull_request.number }}
+  group: compat-integrity-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
       - name: Checkout PR head and full history
         uses: actions/checkout@v4
         with:
-          ref: \${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Set up Python 3.12
@@ -68,7 +68,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: compat-integrity-\${{ github.run_id }}
+          name: compat-integrity-${{ github.run_id }}
           path: build/compat-integrity/**
           if-no-files-found: warn
           retention-days: 14

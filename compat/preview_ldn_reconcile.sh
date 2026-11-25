@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
-OUT=\${S2A_COMPAT_PREVIEW_OUT:-build/compat-integrity}
+OUT=${S2A_COMPAT_PREVIEW_OUT:-build/compat-integrity}
 PATCH_DIR=compat/patches
 SERIES="$PATCH_DIR/series"
 MANIFEST="compat/改动清单.md"
@@ -19,7 +19,7 @@ OBSOLETE=(
 )
 
 present=0
-for p in "\${OBSOLETE[@]}"; do
+for p in "${OBSOLETE[@]}"; do
   if grep -Fxq "$p" "$SERIES"; then present=$((present + 1)); fi
 done
 
@@ -34,12 +34,12 @@ if [ "$present" -eq 0 ]; then
   exit "$rc"
 fi
 
-[ "$present" -eq "\${#OBSOLETE[@]}" ] || {
-  echo "Partial obsolete LDN patch set: found $present of \${#OBSOLETE[@]}" >&2
+[ "$present" -eq "${#OBSOLETE[@]}" ] || {
+  echo "Partial obsolete LDN patch set: found $present of ${#OBSOLETE[@]}" >&2
   exit 2
 }
 
-python3 - "$SERIES" "\${OBSOLETE[@]}" <<'PY'
+python3 - "$SERIES" "${OBSOLETE[@]}" <<'PY'
 import sys
 path = sys.argv[1]
 remove = set(sys.argv[2:])
@@ -53,7 +53,7 @@ with open(path, "w", encoding="utf-8") as f:
     f.write("\n".join(line for line in lines if line.strip() not in remove) + "\n")
 PY
 
-for p in "\${OBSOLETE[@]}"; do
+for p in "${OBSOLETE[@]}"; do
   [ -f "$PATCH_DIR/$p" ] || { echo "Missing patch file: $p" >&2; exit 2; }
   mv "$PATCH_DIR/$p" "$OUT/superseded/$p"
 done
@@ -64,7 +64,7 @@ bash compat/verify.sh --trees > "$OUT/tree_hashes.txt" 2> "$OUT/tree_hashes.err"
 trees_rc=$?
 set -e
 read -r EXPECT CUR < "$OUT/tree_hashes.txt"
-[ -n "\${EXPECT:-}" ] && [ -n "\${CUR:-}" ] || {
+[ -n "${EXPECT:-}" ] && [ -n "${CUR:-}" ] || {
   cat "$OUT/tree_hashes.err" >&2
   echo "verify.sh --trees did not return both tree IDs" >&2
   exit 3
@@ -86,7 +86,7 @@ cp "$PATCH_DIR/$NEW" "$OUT/$NEW"
 cp "$SERIES" "$OUT/series"
 
 # Keep the manifest's historical entries, but mark the four superseded patches.
-python3 - "$MANIFEST" "$NEW" "\${OBSOLETE[@]}" <<'PY'
+python3 - "$MANIFEST" "$NEW" "${OBSOLETE[@]}" <<'PY'
 import sys
 path, new = sys.argv[1], sys.argv[2]
 obsolete = set(sys.argv[3:])
@@ -104,7 +104,6 @@ with open(path, "w", encoding="utf-8") as f:
     f.write("\n".join(out) + "\n")
 PY
 cp "$MANIFEST" "$OUT/改动清单.md"
-cp "$OUT/superseded/"*.patch "$OUT/superseded/" 2>/dev/null || true
 
 set +e
 bash compat/verify.sh > "$OUT/verify.log" 2>&1
