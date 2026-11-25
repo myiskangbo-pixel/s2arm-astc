@@ -170,3 +170,14 @@ Validated HEAD `60723ddffb62916f8d79a714fa9b8e0b7e80b731`, PR #2 open draft, bas
 - 触发的 Contributor self-check：Run [45557437130](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45557437130)，Job ID `139012798025`。本次记录时仍为 in_progress，诊断步骤尚未运行完成；因此**尚无实验结论，不能宣称已定位首个失败补丁**。
 - 同一 HEAD 的 BC ASTC validation：Run [45557437237](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45557437237)，记录时 in_progress。
 - 当前实验目的：确定 series 中第一个无法应用的补丁，验证失败是否确为 `20261123-0820-ldn-dual-protocol-auto.patch`，并区分“首次补丁应用失败”与“全部补丁可应用但最终树 SHA 不一致”。不得未经日志证据调整 1140/0113 顺序或重写补丁。
+
+
+## 9. 2026-11-25：首次补丁冲突复核与诊断增强
+
+- 已重新核对 Run [45561663349](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45561663349) 的 job log（Job ID `139026566877`）。确定性重放在上游 tree 构造后，前 673 个补丁成功；第 674 个首次失败：`20261121-2020-ldn-route-select-by-system-route.patch`。
+- 失败位置：`src/Ryujinx.Common/Ryujinx.Common.csproj:16` 和 `src/Ryujinx.Common/Utilities/NetworkHelpers.cs:1`。错误为 `patch does not apply`。注意这不是此前误判的 20261123-0820 补丁。
+- 该 2020 补丁包含对 `Ryujinx.Common.csproj` 的 `InternalsVisibleTo Include="S2A.Services.Tests"` 新增，以及对 `NetworkHelpers.cs` 的大段修改。当前最终 compat/tree 中已存在这些内容，但重放到 674 时无法应用，说明必须检查第 674 步的临时 index 内容与其前置历史，而不能直接改补丁顺序。
+- 最新完整自检 Run [45561663349](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45561663349) 仍失败：`dev_run_test` 新红（501 秒，帧停在第 40 帧，心跳仍在增长）；Ryujinx 补丁核对失败；第一层仅 119/125 有效结论，6 项无结论。Run [45561663451](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45561663451) BC-ASTC 专项成功。
+- 为取得首个失败时的准确文件内容，已增强 `compat/replay_diagnose.sh`：提交 `a34397fd0e78d9a8acfa8e57aee8d3c60b03071a`。新增输出失败时 index 中的 `Ryujinx.Common.csproj` 与 `NetworkHelpers.cs` 完整内容、补丁 hunk 和 index blob SHA。
+- 新一轮验证：Contributor self-check Run [45566909835](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45566909835)；BC-ASTC Run [45566909612](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45566909612)。记录时仍在运行，尚无新结论。
+- 下一步：读取 45566909835 的诊断输出，确认第 674 步前 csproj 与 NetworkHelpers 的实际内容；追溯哪个先前补丁已引入相同/冲突内容，判断是重复补丁、基线偏移还是 patch hunk 过时。不要先改 series。另行调查 `dev_run_test` 第 40 帧停滞的新红。
