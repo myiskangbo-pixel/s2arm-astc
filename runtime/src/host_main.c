@@ -402,14 +402,14 @@ static int host_run(int argc, char **argv) {
 #if TARGET_OS_IPHONE
     // 游戏数据（服务接入线登记游戏用：exefs/main.npdm、romfs/、ctl/control.nacp）在资源包根（测试层契约），没给就指过去
     if (!getenv("S2A_GAME_DATA")) { setenv("S2A_GAME_DATA", lc->game_data, 0); LOG("游戏数据：%s", lc->game_data); }   // 启动上下文资源包根（兼容 = $HOME/Documents/资源包）
-#if TARGET_OS_TV
-    // Apple TV（11-15）：资源包里有 BC → ASTC 预转包（pack/jobs/tvos.py derive 出、随资源包推进电视）就交给渲染器（graphics/metal/gal_astc.m 查包）；
-    //   A15 不支持 BC 贴图，没这个包就在 CPU 上整张解成未压缩、贴图内存涨 4–8 倍。已设的环境变量优先（诊断 / 对照局）
+    // iOS/iPadOS 与 Apple TV：资源包里有 BC → ASTC 预转包（pack/jobs/astc_job.py 出）就交给渲染器（graphics/metal/gal_astc.m 查包）。
+    //   不支持 BC 的设备可直接采样 ASTC 4x4，避免 CPU 解成未压缩格式造成额外内存压力；设备若原生支持 BC，Metal 层会忽略此包。
+    //   已设的环境变量优先（诊断 / 对照局）；资源包没有该文件时保持原有 CPU 解压回退。
     { const char *gd = getenv("S2A_GAME_DATA"); char ap[1100]; struct stat st;
       if (gd && *gd && !getenv("NXGAL_ASTC_PACK") && snprintf(ap, sizeof ap, "%s/astc.pack", gd) < (int)sizeof ap && !stat(ap, &st) && S_ISREG(st.st_mode)) {
-          setenv("NXGAL_ASTC_PACK", ap, 0); LOG("贴图：用 ASTC 预转包 %s（%lld MB）", ap, (long long)(st.st_size >> 20)); }
+          setenv("NXGAL_ASTC_PACK", ap, 0); LOG("贴图：发现 ASTC 预转包 %s（%lld MB）", ap, (long long)(st.st_size >> 20)); }
       else if (!getenv("NXGAL_ASTC_PACK")) LOG("【黄】贴图：资源包里没有 ASTC 预转包（%s/astc.pack），BC 贴图在 CPU 上解压，内存占用高", gd ? gd : "?"); }
-#endif
+
 #endif
     // 出包期工具模式（Oodle：oodle_tool.c；GLSLC：glslc_tool.c）：只要装好的模块与游戏主线程，不起图形 / 前端、不进 nnMain——起游戏主线程，做完就退出。
     //   Oodle 解码器在 SDK 初始化前做完，不要 C#；GLSLC 与 LZ5（勇者斗恶龙 XI S 的 LZ5_decompress_safe，要游戏 malloc）要等 nninitStartup 与各模块全局构造，

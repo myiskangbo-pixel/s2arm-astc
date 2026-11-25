@@ -382,7 +382,8 @@ def _build(c):
     patches.record(c, gid, "ios", product_root(c, gid))   # 补丁打入结果（打上 / 没打上，完成页列；deliver 之前产物根还在，11-14）
     from library import iphone_ready
     had_iphone = iphone_ready(c, gid)   # 出包前这款就有能装的 iPhone 包（只出 Apple TV 时据此决定派生完要不要撤掉顺带出的 iPhone 交付件，#1459）
-    deliver(c, gid, product_root(c, gid), pack_dir, ipa)
+    deliver(c, gid, product_root(c, gid), pack_dir, ipa,
+            astc_romfs=None if c.r.get("platform") == "tvos" else Path(extraction) / "romfs")
     finish_kit_state(c, gid)
     tv_out = None
     if c.r.get("platform") == "tvos":   # Apple TV（11-15）：同一份改写产物派生（pack/jobs/tvos.py derive），要在清解包目录之前（ASTC 预转读 romfs）
@@ -490,7 +491,7 @@ def finish_kit_state(c, gid):
     programs.save_recipe(c, gid)
 
 
-def deliver(c, gid, root, pack_dir, ipa):
+def deliver(c, gid, root, pack_dir, ipa, *, astc_romfs=None):
     """出包收尾：交付件搬进这款的 image/ios（游戏库结构 v3），game.json 的 ios 记壳号、兼容判据、资源包号；单款 ipa 不留（装机现组容器）。
     先存容器件、再换资源包、最后写 game.json：中途被打断时 game.json 还是上一版的，资源包号对不上就按「变了」补推，不会少推"""
     import host_update
@@ -500,6 +501,11 @@ def deliver(c, gid, root, pack_dir, ipa):
     if kit is None:
         raise Failure("一键出包结束了，但产物根里没有组装 iPhone 版要用的文件（main.npdm），请查看日志。", code="package_failed")
     to_img(c, gid, root, pack_dir)
+    # iPhone 设备通常没有原生 BC 纹理格式：在资源包完成 IMG 转换后、登记 index_sha256 前生成 ASTC 4x4 预转包。
+    # Apple TV 由 tvos.derive 在派生包中单独生成，避免在 tvOS 请求里重复编译 / 预转。
+    if astc_romfs is not None:
+        from astc_job import build_for_pack
+        build_for_pack(c, astc_romfs, pack_dir, "iPhone")
     want = read(Path(pack_dir) / "manifest.json", {}).get("index_sha256")
     if not want:
         raise Failure(f"资源包缺清单或清单没有 index_sha256（{pack_dir}）：请重新打 iPhone 包。", code="package_failed")

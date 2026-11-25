@@ -1,0 +1,200 @@
+name: Windows x64 S2Arm toolchain bundle
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-bundle.yml'
+      - 'launchers/windows/**'
+      - 'launchers/macos/prepare_build.py'
+      - 'pack/**'
+      - 'runtime/**'
+      - 'graphics/**'
+      - 'services/systemdata/**'
+      - 'tools/toolchain*'
+      - 'tests/astc_pack_test.py'
+      - 'tests/dev_run_test.sh'
+      - 'compat/tree/global.json'
+
+permissions:
+  contents: read
+
+jobs:
+  apple-inputs:
+    name: Build matching iOS Shell, Fonts and Tzdata
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Checkout full source and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.403'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Apple build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list --versions bash >/dev/null 2>&1 || brew install bash
+          brew list --versions cmake >/dev/null 2>&1 || brew install cmake
+          brew list --versions python@3.12 >/dev/null 2>&1 || brew install python@3.12
+          brew list --versions meson >/dev/null 2>&1 || brew install meson
+          brew list --versions ninja >/dev/null 2>&1 || brew install ninja
+
+      - name: Prepare pinned Apple build environment
+        shell: bash
+        run: python3 launchers/macos/prepare_build.py
+
+      - name: Build fonts, tzdata and iOS Shell inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/windows-inputs
+          export S2A_PY="$PWD/build/venv/bin/python3"
+          export S2A_GMAKE="$PWD/build/macos/gmake/bin/make"
+          "$S2A_PY" pack/fonts/make_open_fonts.py build/windows-inputs/Fonts
+          bash services/systemdata/make_tzdata.sh --bundle-to build/windows-inputs/Tzdata
+          bash pack/shell_build.sh build/windows-inputs/Shell
+
+      - name: Upload matching Apple inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle-apple-inputs
+          path: build/windows-inputs/**
+          if-no-files-found: error
+          retention-days: 3
+
+  windows-bundle:
+    name: Build and validate Windows x64 distribution
+    needs: apple-inputs
+    runs-on: windows-2025
+    timeout-minutes: 180
+    steps:
+      - name: Checkout full source and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download matching Apple inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-bundle-apple-inputs
+          path: build/windows-inputs
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.403'
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install LLVM
+        shell: pwsh
+        run: |
+          choco install llvm --yes --no-progress
+          "$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          clang --version
+          clang++ --version
+          cmake --version
+          cargo --version
+
+      - name: Install pinned Python build requirements
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r launchers/macos/requirements-runtime.txt -r tools/rewriter-requirements.txt
+
+      - name: Prepare pinned rewriter dependencies
+        shell: pwsh
+        run: python runtime/rewriter/prepare_deps.py build/rewriter-deps
+
+      - name: Download and verify Zstandard runtime
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'zstd-v1.5.7-win64.zip'
+          $extract = Join-Path $env:RUNNER_TEMP 'zstd-v1.5.7-win64'
+          Invoke-WebRequest -Uri 'https://github.com/meta/zstd/releases/download/v1.5.7/zstd-v1.5.7-win64.zip' -OutFile $zip
+          $actual = (Get-FileHash $zip -Algorithm SHA512).Hash.ToLowerInvariant()
+          $expected = 'a96dc5417943c03fa231bf2d6a586b7ae7254fa52fdc15d302f296b5ff88e1ff0f07120a720149eb82ea0f0c65444393ebf05d2ee1bd1db341b803ff65a2e675'
+          if ($actual -ne $expected) { throw "Zstandard archive SHA512 mismatch: $actual" }
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+          $exe = Get-ChildItem -Path $extract -Filter 'zstd.exe' -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'zstd.exe not found in verified archive' }
+          $env:S2A_RT_ZSTD = $exe.Directory.FullName
+          $env:S2A_REWRITER_DEPS = Join-Path $env:GITHUB_WORKSPACE 'build\rewriter-deps'
+          "S2A_RT_ZSTD=$env:S2A_RT_ZSTD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "S2A_REWRITER_DEPS=$env:S2A_REWRITER_DEPS" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if (-not (Test-Path 'C:\Program Files\Git\usr\bin\bash.exe')) { throw 'Git for Windows Bash missing' }
+
+      - name: Build self-contained Windows x64 distribution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          python -X utf8 launchers/windows/bundle_win.py build/s2arm-windows-x64 --shell build/windows-inputs/Shell --tzdata build/windows-inputs/Tzdata --fonts build/windows-inputs/Fonts 2>&1 | Tee-Object build/windows-bundle.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify bundled BC-ASTC4x4 toolchain
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\s2arm-windows-x64'
+          $dlls = @(Get-ChildItem (Join-Path $bundle 'Engine\Binaries\Prepare\astc') -Filter 'libbc2astc-*.dll' -ErrorAction SilentlyContinue)
+          if ($dlls.Count -lt 1) { throw 'BC-ASTC prebuilt DLL missing from Windows distribution' }
+          $env:S2A_PREBUILT_TOOLS = Join-Path $bundle 'Engine\Binaries\Prepare'
+          $python = Join-Path $bundle 'Runtime\python\python.exe'
+          $enginePack = Join-Path $bundle 'Engine\pack'
+          & $python -B -c "import sys; sys.path.insert(0, r'$enginePack'); import astc_pack; p=astc_pack.build_tool(); print('BC-ASTC DLL:', p); astc_pack.Lib(p); print('BC-ASTC DLL load: OK')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Write bundle checksums
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\s2arm-windows-x64'
+          $out = Join-Path $bundle 'SHA256SUMS.txt'
+          Get-ChildItem -Path $bundle -File -Recurse | Where-Object { $_.FullName -ne $out } | Sort-Object FullName | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $relative = $_.FullName.Substring($bundle.Length + 1)
+            "$hash *$relative"
+          } | Set-Content -Path $out -Encoding ascii
+
+      - name: Upload Windows x64 distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2arm-windows-x64-bundle
+          path: build/s2arm-windows-x64/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Windows build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2arm-windows-bundle-logs
+          path: |
+            build/windows-bundle.log
+            build/windows/prepare-logs/**
+          if-no-files-found: warn
+          retention-days: 14

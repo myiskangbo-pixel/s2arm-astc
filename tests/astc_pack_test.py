@@ -248,5 +248,18 @@ class UnzstdCliTest(unittest.TestCase):
             ap._zstd = real
 
 
+
+class IosHostWiringTest(unittest.TestCase):
+    def test_ios_host_discovers_astc_pack_without_tvos_only_guard(self):
+        # NXGAL_ASTC_PACK 的发现必须位于 TARGET_OS_IPHONE 公共宿主路径内，不能只编进 tvOS。
+        source = (ROOT / "runtime/src/host_main.c").read_text(encoding="utf-8")
+        start = source.index('if (!getenv("S2A_GAME_DATA"))')
+        end = source.index("// 出包期工具模式", start)
+        block = source[start:end]
+        self.assertIn("NXGAL_ASTC_PACK", block)
+        self.assertNotIn("#if TARGET_OS_TV", block)
+        self.assertIn("#if TARGET_OS_IPHONE", source[:start])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
