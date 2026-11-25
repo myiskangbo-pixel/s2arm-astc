@@ -671,7 +671,6 @@
 20261121-1216-audio-depth-catch-up.patch
 20261121-1552-audio-recover-hook-by-event.patch
 20261121-1603-local-player-order-not-hide.patch
-20261121-2020-ldn-route-select-by-system-route.patch
 20261120-2222-direct-link-map-diag.patch
 20261122-0047-audio-effect-state-restore.patch
 20261122-0129-audio-interrupt-virtual-playback.patch
@@ -683,6 +682,4 @@
 20261123-1303-joycon-pair-imu-rotate.patch
 20261122-2108-npad-imu-clock-jump.patch
 20261122-2344-fs-fail-mount.patch
-20261122-2357-ldn-auto-and-socket-route.patch
-20261123-0113-ldn-prefer-lan-gateway-route.patch
-20261123-0820-ldn-dual-protocol-auto.patch
+20261125-1040-ldn-reconcile.patch
