@@ -85,18 +85,6 @@ jobs:
         shell: bash
         run: bash compat/preview_ldn_reconcile.sh
 
-      - name: Update handoff with verified patch-series result
-        if: steps.reconcile.outcome == 'success'
-        shell: bash
-        run: |
-          cat >> docs/BC_ASTC_HANDOFF.md <<EOF
-
-          ## 2026-11-25 — deterministic LDN patch-series reconciliation
-          - Preview workflow: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
-          - The reconciliation script removes the four overlapping LDN route/auto patches from the active series, generates one incremental patch from the remaining series to compat/tree, and runs compat/verify.sh before any commit.
-          - The preview artifact includes the generated patch, superseded patch copies, updated series, manifest, tree diff, and focused dev_run logs. The patch is committed only if console, smoke, lag-heartbeat, and compatibility verification steps all succeed.
-          EOF
-
       - name: Commit verified compatibility patch reconciliation
         if: steps.dev_con.outcome == 'success' && steps.dev_smoke.outcome == 'success' && steps.dev_lag.outcome == 'success' && steps.reconcile.outcome == 'success'
         shell: bash
@@ -104,7 +92,11 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A compat/patches compat/改动清单.md docs/BC_ASTC_HANDOFF.md
+          # Keep this bot commit limited to real compatibility patch changes.
+          # Per-run diagnostics are uploaded as artifacts; appending run IDs to the
+          # tracked handoff on every pass would create a GITHUB_TOKEN push loop and
+          # put subsequent pull_request checks into approval-required state.
+          git add -A compat/patches compat/改动清单.md
           if git diff --cached --quiet; then
             echo "No verified compatibility patch changes to commit"
             exit 0

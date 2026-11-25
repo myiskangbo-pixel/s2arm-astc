@@ -112,13 +112,41 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install LLVM
+      - name: Install LLVM 22 for MSVC STL compatibility
         shell: pwsh
         run: |
-          choco install llvm --yes --no-progress
-          "$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          clang --version
-          clang++ --version
+          $ErrorActionPreference = 'Stop'
+          # windows-2025 currently has LLVM 20.1.8 preinstalled. "choco install"
+          # leaves that older version in place; upgrade to the minimum supported
+          # compiler required by the runner's Visual Studio 18 MSVC STL headers.
+          choco upgrade llvm --version=22.1.8 --yes --no-progress
+          $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
+          $clang = Join-Path $llvmBin 'clang.exe'
+          $clangxx = Join-Path $llvmBin 'clang++.exe'
+          if (-not (Test-Path $clang) -or -not (Test-Path $clangxx)) {
+            throw "Pinned LLVM compiler binaries missing from $llvmBin"
+          }
+          $clangLine = (& $clang --version | Select-Object -First 1)
+          if ($clangLine -notmatch 'clang version (?<version>\d+(?:\.\d+)+)') {
+            throw "Unable to parse clang version: $clangLine"
+          }
+          $clangVersion = [version]$Matches['version']
+          if ($clangVersion -lt [version]'22.0.0') {
+            throw "Clang 22 or newer is required by the MSVC STL; found $clangVersion"
+          }
+          $clangxxLine = (& $clangxx --version | Select-Object -First 1)
+          if ($clangxxLine -notmatch 'clang version (?<version>\d+(?:\.\d+)+)') {
+            throw "Unable to parse clang++ version: $clangxxLine"
+          }
+          $clangxxVersion = [version]$Matches['version']
+          if ($clangxxVersion -ne $clangVersion) {
+            throw "clang / clang++ version mismatch: $clangVersion vs $clangxxVersion"
+          }
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "S2A_CC=$clang" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "S2A_CXX=$clangxx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $clang --version
+          & $clangxx --version
           cmake --version
           cargo --version
 
