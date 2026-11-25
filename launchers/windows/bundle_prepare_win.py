@@ -52,7 +52,11 @@ def run(args, log, env=None):
 def dotnet_publish(project, out, log, aot=True):
     # NativeAOT 单文件（-r win-x64：只出 Windows x64 的原生件）。romfs_index 的 PublishAot 写在工程里、不传 -p：服务层闭包含 netstandard2.0 生成器，
     #   全局属性会波及（同 Mac launchers/macos/bundle_engine.py）
-    run(["dotnet", "publish", ROOT / project, "-c", "Release", "-nologo", "-r", "win-x64", "-p:UseSharedCompilation=false",
+    # MSVC developer environment exports Platform=x64. Ryujinx.Graphics.GAL.csproj enables
+    # AllowUnsafeBlocks in Release|AnyCPU only; inheriting Platform=x64 silently disables it
+    # and causes CS0227 across threaded renderer sources. Keep the managed project platform
+    # AnyCPU; -r win-x64 still controls the runtime/native AOT architecture.
+    run(["dotnet", "publish", ROOT / project, "-c", "Release", "-nologo", "-r", "win-x64", "-p:Platform=AnyCPU", "-p:UseSharedCompilation=false",
          *(["-p:PublishAot=true"] if aot else []), "-o", out], log)
 
 
