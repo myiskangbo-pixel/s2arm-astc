@@ -40,6 +40,13 @@ jobs:
           brew list --versions bash >/dev/null 2>&1 || brew install bash
           echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
 
+      - name: Install GNU coreutils
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list --versions coreutils >/dev/null 2>&1 || brew install coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+
       - name: Fetch pinned Ryujinx base objects
         shell: bash
         run: bash compat/fetch_base.sh

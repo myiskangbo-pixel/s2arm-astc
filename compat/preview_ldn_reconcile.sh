@@ -58,12 +58,30 @@ for p in "${OBSOLETE[@]}"; do
   mv "$PATCH_DIR/$p" "$OUT/superseded/$p"
 done
 
+# The series already contains patch 666; its manifest row was missing.
+python3 - "$MANIFEST" <<'PY'
+import sys
+path = sys.argv[1]
+patch = "20261123-1140-ldn-multihomed-vpn-route-selection.patch"
+entry = "| 20261123-1140-ldn-multihomed-vpn-route-selection.patch | Ryujinx.Common/Utilities/NetworkHelpers.cs | 多网卡/VPN 环境下逐个网卡绑定本机地址进行路由探测，并对有线、物理、网关子网等候选评分，避免隧道或系统默认路由导致局域网联机选错源地址 |"
+with open(path, encoding="utf-8") as f:
+    lines = f.read().splitlines()
+if not any(patch in line for line in lines):
+    idx = next((i for i, line in enumerate(lines) if "20261121-2131-ldn-route-candidate-selection.patch" in line), None)
+    if idx is None:
+        raise SystemExit("cannot find manifest anchor for patch 665")
+    lines.insert(idx + 1, entry)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+PY
+
+
 # Record the exact tree delta before generating the consolidated patch.
 set +e
 bash compat/verify.sh --trees > "$OUT/tree_hashes.txt" 2> "$OUT/tree_hashes.err"
 trees_rc=$?
 set -e
-read -r EXPECT CUR < "$OUT/tree_hashes.txt"
+read -r EXPECT CUR < <(tail -n 1 "$OUT/tree_hashes.txt")
 [ -n "${EXPECT:-}" ] && [ -n "${CUR:-}" ] || {
   cat "$OUT/tree_hashes.err" >&2
   echo "verify.sh --trees did not return both tree IDs" >&2

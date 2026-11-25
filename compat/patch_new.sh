@@ -9,7 +9,7 @@ NAME=${1:?"用法：patch_new.sh <名字> <理由> [路径…]"}; WHY=${2:?"要�
 ROOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel); cd "$ROOT"
 P=compat/patches; L=compat/改动清单.md
 mkdir -p "$P"; touch "$P/series"
-read -r EXPECT CUR < <(bash compat/verify.sh --trees || true)
+read -r EXPECT CUR < <(bash compat/verify.sh --trees 2>&1 | tail -n 1 || true)
 [ -n "${EXPECT:-}" ] && [ -n "${CUR:-}" ] || { echo "verify.sh --trees 没给出树（先修好已有补丁）" >&2; exit 2; }
 # 补丁名用生成时刻作前缀（10-28 维护者梳理步 10）：原先按「最大号 + 1」编号，两支并行各自生成都拿到同一个号，合入时撞号要列车续号（train_renumber.py）；
 #   时刻前缀两支不会撞，series 与改动清单都是末尾追加、.gitattributes 设 merge=union，并发合入不再冲突。补丁顺序以 series 为准，与名字无关
