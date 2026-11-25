@@ -22,7 +22,7 @@ permissions:
 jobs:
   apple-inputs:
     name: Build matching iOS Shell, Fonts and Tzdata
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 120
     steps:
       - name: Checkout full source and tags
