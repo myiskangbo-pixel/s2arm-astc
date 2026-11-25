@@ -15,6 +15,10 @@ on:
       - 'tools/contrib_tools.tsv'
       - 'tools/contrib_layer2.tsv'
       - 'tools/idle_timeout.sh'
+      - 'compat/**'
+      - 'tests/dev_run_test.sh'
+      - 'tests/fake_*.py'
+      - 'tools/dev_run.sh'
       - '.github/workflows/**'
 
 permissions:

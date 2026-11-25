@@ -1,0 +1,74 @@
+name: S2Arm compatibility integrity
+
+on:
+  pull_request:
+    paths:
+      - 'compat/**'
+      - 'tests/dev_run_test.sh'
+      - 'tests/fake_*.py'
+      - 'tools/dev_run.sh'
+      - '.github/workflows/compat-integrity.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compat-integrity-\${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  integrity:
+    name: Compatibility and focused dev_run checks
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Checkout PR head and full history
+        uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Bash 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list --versions bash >/dev/null 2>&1 || brew install bash
+          echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch pinned Ryujinx base objects
+        shell: bash
+        run: bash compat/fetch_base.sh
+
+      - name: Focused dev_run console-stream regression
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p build/compat-integrity
+          DEV_RUN_GROUPS=con DEV_RUN_PAR=2 bash tests/dev_run_test.sh 2>&1 | tee build/compat-integrity/dev_run_con.log
+
+      - name: Focused dev_run crash-smoke regression
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p build/compat-integrity
+          DEV_RUN_GROUPS=smoke DEV_RUN_PAR=2 bash tests/dev_run_test.sh 2>&1 | tee build/compat-integrity/dev_run_smoke.log
+
+      - name: Reconcile or verify compatibility patch series
+        shell: bash
+        run: bash compat/preview_ldn_reconcile.sh
+
+      - name: Upload compatibility diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-integrity-\${{ github.run_id }}
+          path: build/compat-integrity/**
+          if-no-files-found: warn
+          retention-days: 14
