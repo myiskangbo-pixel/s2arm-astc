@@ -144,7 +144,7 @@ def _compile_lib():
     pre = prebuilt_lib()
     if pre:
         return pre
-    cc = shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
+    cc = os.environ.get('S2A_CC') or shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
     if not cc or not os.path.isfile(_YAZ0_C):
         return None
     root = os.path.normpath(os.path.join(_HERE, '..', '..'))
@@ -156,8 +156,10 @@ def _compile_lib():
         # Windows（clang 出 MSVC 目标）不认 -fPIC，且共享库默认不导出函数：按名导出 yaz0_decompress
         flags = ['-Wl,/EXPORT:yaz0_decompress'] if os.name == 'nt' else ['-fPIC']
         built = subprocess.run([cc, '-O2', *flags, '-shared', '-o', tmp, _YAZ0_C],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if built.returncode != 0:
+            print('Yaz0 compiler %s exited %d: %s' % (cc, built.returncode,
+                  built.stdout.decode('utf-8', errors='replace')), file=sys.stderr)
             try:
                 os.remove(tmp)
             except OSError:
