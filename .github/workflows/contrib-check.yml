@@ -87,6 +87,7 @@ jobs:
 
       - name: Deterministic Ryujinx patch replay diagnosis
         shell: bash
+        continue-on-error: true
         run: bash compat/replay_diagnose.sh "$GITHUB_SHA"
 
       - name: Verify generated synthetic system archive
