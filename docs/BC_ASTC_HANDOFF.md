@@ -181,3 +181,12 @@ Validated HEAD `60723ddffb62916f8d79a714fa9b8e0b7e80b731`, PR #2 open draft, bas
 - 为取得首个失败时的准确文件内容，已增强 `compat/replay_diagnose.sh`：提交 `a34397fd0e78d9a8acfa8e57aee8d3c60b03071a`。新增输出失败时 index 中的 `Ryujinx.Common.csproj` 与 `NetworkHelpers.cs` 完整内容、补丁 hunk 和 index blob SHA。
 - 新一轮验证：Contributor self-check Run [45566909835](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45566909835)；BC-ASTC Run [45566909612](https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45566909612)。记录时仍在运行，尚无新结论。
 - 下一步：读取 45566909835 的诊断输出，确认第 674 步前 csproj 与 NetworkHelpers 的实际内容；追溯哪个先前补丁已引入相同/冲突内容，判断是重复补丁、基线偏移还是 patch hunk 过时。不要先改 series。另行调查 `dev_run_test` 第 40 帧停滞的新红。
+
+
+## 2026-11-25 17:45 CST — completed CI checkpoint
+- Observed HEAD 14061fc59a9dfa84f6ebcc6110b8637c37ef2e45; base b9c1840178d77a3537c67aaa9f8c98c22eacc64c; PR #2 open draft.
+- https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45581901998 success; static library artifact 15006044696, not a runtime bundle.
+- https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45581902002 failure, job 139093769073 cancelled; no source verdict.
+- https://github.com/myiskangbo-pixel/s2arm-astc/actions/runs/45581902156 failure, job 139093943368. 125 planned/executed, 118 green, 2 red, 120 conclusions, 5 missing. dev_run_test early-exit smoke at frame 50, baseline no conclusion; Ryujinx patch check baseline-red.
+- Diagnostic artifact 15008459802, 7677 bytes, GitHub SHA256 1b62953ea06e08588df3a0d67a919d4f3d014ba7ebd1ab0cc21aa62c99ed82d5, expires 2026-12-09T09:40:02Z; not independently rehashed.
+- Replay first failure remains #674 20261121-2020-ldn-route-select-by-system-route.patch, seven files. Last successful touch: csproj 20261121-2131-ldn-route-candidate-selection.patch; NetworkHelpers.cs 20261123-1140-ldn-multihomed-vpn-route-selection.patch; five LDN service files 20261121-1628-ldn-target-route-selection.patch. Next compare pre/post blob identities and dependency order before changing series; investigate smoke fixture and five missing gate conclusions. No source repair in this checkpoint. No Windows ZIP, complete shell or IPA delivered. Documentation update may trigger new CI.
