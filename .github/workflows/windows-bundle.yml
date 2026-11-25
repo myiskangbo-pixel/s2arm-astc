@@ -169,6 +169,20 @@ jobs:
           & $python -B -c "import sys; sys.path.insert(0, r'$enginePack'); import astc_pack; p=astc_pack.build_tool(); print('BC-ASTC DLL:', p); astc_pack.Lib(p); print('BC-ASTC DLL load: OK')"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Run packaged BC-ASTC4x4 synthetic RomFS and iOS delivery tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\\s2arm-windows-x64'
+          $env:S2A_PREBUILT_TOOLS = Join-Path $bundle 'Engine\\Binaries\\Prepare'
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'pack\\jobs'
+          $python = Join-Path $bundle 'Runtime\\python\\python.exe'
+          if (-not (Test-Path $python)) { throw 'Bundled Python runtime missing' }
+          & $python -B tests/astc_pack_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python -B pack/jobs/tests/test_ipa_astc.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Write bundle checksums
         shell: pwsh
         run: |
