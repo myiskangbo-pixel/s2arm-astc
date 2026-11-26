@@ -109,7 +109,7 @@ def c_path():
     digest = hashlib.sha256(source_digest().encode() + b"\0")
     for value in (platform.system(), platform.machine(), *(os.environ.get(k, "") for k in
                    ("CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "CMAKE_TOOLCHAIN_FILE", "MACOSX_DEPLOYMENT_TARGET",
-                    "S2A_REWRITER_CC", "CMAKE_GENERATOR", "CMAKE_MAKE_PROGRAM"))):
+                    "S2A_REWRITER_CC", "S2A_REWRITER_CXX", "CMAKE_GENERATOR", "CMAKE_MAKE_PROGRAM"))):
         digest.update(value.encode() + b"\0")
     if os.name == "nt": digest.update(b"msvcrt=static\0")   # Windows 静态 C 运行库（下面 cmake 参数）进缓存键：旧的动态运行库那份不复用
     cache = Path(os.environ.get("S2A_REWRITER_CACHE", ROOT / "build/rewriter-cli")).resolve()
@@ -142,9 +142,24 @@ def c_path():
                                  "请安装 LLVM + Ninja，或设置 S2A_REWRITER_CC")
             if Path(compiler).name.lower() in ("cl", "cl.exe"):
                 raise ValueError("Windows C 改写器不支持 MSVC cl.exe（缺少 unsigned __int128）")
+            # Capstone configures both C and C++; CMake must not auto-discover
+            # clang++ when C was explicitly pinned to clang-cl. That creates
+            # an unsupported GNU/MSVC frontend mix on Windows.
+            cxx_compiler = os.environ.get("S2A_REWRITER_CXX")
+            if not cxx_compiler:
+                compiler_name = Path(compiler).name.lower()
+                if compiler_name in ("clang-cl", "clang-cl.exe"):
+                    cxx_compiler = compiler
+                elif compiler_name in ("clang", "clang.exe"):
+                    cxx_compiler = shutil.which("clang++")
+                elif compiler_name in ("gcc", "gcc.exe"):
+                    cxx_compiler = shutil.which("g++")
+            if not cxx_compiler:
+                raise ValueError("Windows C 改写器找不到与 C 编译器匹配的 C++ 编译器；请设置 S2A_REWRITER_CXX")
             if not shutil.which("ninja"):
                 raise ValueError("Windows C 改写器固定使用 Ninja 生成器，但 PATH 中没有 ninja")
             configure += ["-G", "Ninja", "-DCMAKE_C_COMPILER:FILEPATH=" + compiler,
+                          "-DCMAKE_CXX_COMPILER:FILEPATH=" + cxx_compiler,
                           "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
                           "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW"]
         subprocess.run(configure, check=True, stdout=sys.stderr)
@@ -152,14 +167,18 @@ def c_path():
             cache_text = (Path(tmp) / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace")
             if "CMAKE_GENERATOR:INTERNAL=Ninja" not in cache_text:
                 raise ValueError("Windows C 改写器 CMake 未采用 Ninja 生成器")
-            clang_id = any(f"CMAKE_C_COMPILER_ID:{kind}=Clang" in cache_text
-                            for kind in ("INTERNAL", "STRING"))
-            gnu_id = any(f"CMAKE_C_COMPILER_ID:{kind}=GNU" in cache_text
-                         for kind in ("INTERNAL", "STRING"))
-            if not (clang_id or gnu_id):
-                raise ValueError("Windows C 改写器 CMake 未采用 Clang/GNU；拒绝使用 MSVC")
-            if Path(compiler).name.lower().startswith("clang") and not clang_id:
-                raise ValueError("Windows 指定了 Clang，但 CMake 未识别为 Clang")
+            def cache_value(name):
+                prefix = name + ":"
+                return next((line.split("=", 1)[1] for line in cache_text.splitlines()
+                             if line.startswith(prefix) and "=" in line), "")
+            c_id = cache_value("CMAKE_C_COMPILER_ID")
+            cxx_id = cache_value("CMAKE_CXX_COMPILER_ID")
+            if c_id not in ("Clang", "GNU") or cxx_id not in ("Clang", "GNU"):
+                raise ValueError("Windows C 改写器 CMake 未同时采用 Clang/GNU C 与 C++ 编译器；拒绝使用 MSVC")
+            c_front = cache_value("CMAKE_C_COMPILER_FRONTEND_VARIANT")
+            cxx_front = cache_value("CMAKE_CXX_COMPILER_FRONTEND_VARIANT")
+            if c_front and cxx_front and c_front != cxx_front:
+                raise ValueError("Windows C 改写器 C/C++ 前端不一致：" + c_front + " / " + cxx_front)
         subprocess.run(["cmake", "--build", tmp, "--config", "Release", "--target", "s2a-rewrite", "--parallel", "2"],
                        check=True, stdout=sys.stderr)
         built = Path(tmp) / name
