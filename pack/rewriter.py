@@ -152,11 +152,13 @@ def c_path():
             cache_text = (Path(tmp) / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace")
             if "CMAKE_GENERATOR:INTERNAL=Ninja" not in cache_text:
                 raise ValueError("Windows C 改写器 CMake 未采用 Ninja 生成器")
-            clang_id = "CMAKE_C_COMPILER_ID:INTERNAL=Clang"
-            gnu_id = "CMAKE_C_COMPILER_ID:INTERNAL=GNU"
-            if not (clang_id in cache_text or gnu_id in cache_text):
+            clang_id = any(f"CMAKE_C_COMPILER_ID:{kind}=Clang" in cache_text
+                            for kind in ("INTERNAL", "STRING"))
+            gnu_id = any(f"CMAKE_C_COMPILER_ID:{kind}=GNU" in cache_text
+                         for kind in ("INTERNAL", "STRING"))
+            if not (clang_id or gnu_id):
                 raise ValueError("Windows C 改写器 CMake 未采用 Clang/GNU；拒绝使用 MSVC")
-            if Path(compiler).name.lower().startswith("clang") and clang_id not in cache_text:
+            if Path(compiler).name.lower().startswith("clang") and not clang_id:
                 raise ValueError("Windows 指定了 Clang，但 CMake 未识别为 Clang")
         subprocess.run(["cmake", "--build", tmp, "--config", "Release", "--target", "s2a-rewrite", "--parallel", "2"],
                        check=True, stdout=sys.stderr)
