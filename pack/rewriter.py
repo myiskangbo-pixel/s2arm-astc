@@ -132,11 +132,16 @@ def key():
 
 
 def dependency_dir():
-    candidates = []
-    if os.environ.get("S2A_REWRITER_DEPS"):
-        candidates.append(Path(os.environ["S2A_REWRITER_DEPS"]))
-    candidates.extend((ROOT / "build/rewriter-deps",
-                       Path(os.environ.get("S2A_RUN_ROOT") or Path.home() / ".s2arm/run") / "s2arm/deps/rewriter-deps"))
+    # An explicit dependency directory is an isolation boundary, not merely a
+    # preferred hint. Falling back to the checkout or shared user cache when it
+    # is incomplete makes hermetic tests accidentally succeed with undeclared
+    # dependencies and can mix two toolchain versions.
+    explicit = os.environ.get("S2A_REWRITER_DEPS")
+    if explicit:
+        candidates = [Path(explicit)]
+    else:
+        candidates = [ROOT / "build/rewriter-deps",
+                      Path(os.environ.get("S2A_RUN_ROOT") or Path.home() / ".s2arm/run") / "s2arm/deps/rewriter-deps"]
     for candidate in candidates:
         if ((candidate / "capstone-5.0.7/src/CMakeLists.txt").is_file()
                 and (candidate / "lz4-4.4.5/lz4libs/lz4.c").is_file()):
