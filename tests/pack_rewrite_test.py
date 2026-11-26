@@ -67,21 +67,26 @@ class DependencyDiscovery(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("discovery fixture\n")
 
-    def test_explicit_then_checkout_then_shared(self):
-        for directory in (self.shared, self.checkout, self.explicit):
-            self.prepare(directory)
-            self.assertEqual(rewriter.dependency_dir(), directory.resolve())
+    def test_explicit_directory_is_used_when_complete(self):
+        self.prepare(self.explicit)
+        self.assertEqual(rewriter.dependency_dir(), self.explicit.resolve())
+
+    def test_checkout_is_used_without_environment_override(self):
+        self.prepare(self.checkout)
+        with mock.patch.dict(os.environ, S2A_REWRITER_DEPS=""):
+            self.assertEqual(rewriter.dependency_dir(), self.checkout.resolve())
 
     def test_shared_is_used_without_environment_override(self):
         self.prepare(self.shared)
         with mock.patch.dict(os.environ, S2A_REWRITER_DEPS=""):
             self.assertEqual(rewriter.dependency_dir(), self.shared.resolve())
 
-    def test_incomplete_candidate_does_not_hide_complete_shared_directory(self):
+    def test_incomplete_explicit_directory_does_not_fall_back(self):
         self.prepare(self.explicit)
         (self.explicit / "lz4-4.4.5/lz4libs/lz4.c").unlink()
         self.prepare(self.shared)
-        self.assertEqual(rewriter.dependency_dir(), self.shared.resolve())
+        with self.assertRaisesRegex(ValueError, "缺 C 改写器固定依赖"):
+            rewriter.dependency_dir()
 
     def test_all_candidates_missing_fail_without_creating_directories(self):
         with self.assertRaisesRegex(ValueError, "缺 C 改写器固定依赖"):
