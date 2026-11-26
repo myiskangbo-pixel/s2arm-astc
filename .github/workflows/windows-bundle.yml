@@ -257,12 +257,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           bash tests/rewrite_win_sp_test.sh 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-win-sp.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:REW = $rewriter
-          python -X utf8 tests/rewrite_sdk_c_test.py 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-sdk-c.log')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          # Build the public C API concurrency harness with the same compiler
-          # and CRT, then compare both threaded outputs to the checked-in goldens.
+          # Build the public C API concurrency harness before the SDK contract
+          # test: rewrite_sdk_c_test.py runs both the CLI and the sibling harness.
           $apiBuild = Join-Path $env:GITHUB_WORKSPACE 'build/rewriter-api'
           $cmakeArgs = @(
             '-S', 'runtime/rewriter', '-B', $apiBuild, '-G', 'Ninja',
@@ -277,9 +273,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & cmake --build $apiBuild --target s2a-rewrite s2a-rewrite-api-test --parallel 2 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewriter-api-build.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # Keep the CLI and its C API harness as siblings, as required by the
+          # contract test. This also ensures both use the same compiler and CRT.
           $env:REW = Join-Path $apiBuild 's2a-rewrite.exe'
-          python -X utf8 tests/rewrite_c_api_test.py 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-c-api.log')
+          python -X utf8 tests/rewrite_sdk_c_test.py 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-sdk-c.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          python -X utf8 tests/rewrite_c_api_test.py 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-c-api.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }}
 
       - name: Download and verify Zstandard runtime
         shell: pwsh
