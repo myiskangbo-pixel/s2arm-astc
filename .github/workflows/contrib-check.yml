@@ -32,7 +32,7 @@ jobs:
   contributor-check:
     name: Contributor self-check (macOS)
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     steps:
       - name: Checkout PR head and full history
@@ -102,8 +102,15 @@ jobs:
         shell: bash
         env:
           CONTRIB_HOST: local
-          CONTRIB_TIMEOUT_S: '900'
-          S2A_GATE_LOAD_WAIT_S: '300'
+          # A dedicated CI runner should not queue behind local interactive work.
+          # Give the complete gate 90 minutes before the wrapper's hard stop;
+          # keep the GitHub job at 120 minutes so diagnostics can still upload.
+          CONTRIB_TIMEOUT_S: '1800'
+          S2A_GATE_LOAD_WAIT_S: '0'
+          S2A_GATE_CPU_IDLE_MIN: '0'
+          GATE_BEAT_S: '60'
+          GATE_DIAG_DIR: ${{ github.workspace }}/build/contrib_check/step-logs
+          GATE_LEDGER: ${{ github.workspace }}/build/contrib_check/gate_ledger.jsonl
           CONTRIB_BASE_RERUN: '1'
         run: |
           set -euo pipefail
@@ -113,6 +120,11 @@ jobs:
           bash tools/contrib_check.sh \
             --base "${{ github.event.pull_request.base.sha }}" \
             --host local
+
+      - name: Summarize interrupted contributor diagnostics
+        if: always()
+        shell: bash
+        run: python3 tools/contrib_diag.py build/contrib_check/step-logs build/contrib_check/contributor-diagnostics.md
 
       - name: Upload contributor self-check diagnostics
         if: always()
@@ -124,5 +136,9 @@ jobs:
             build/contrib_check/base_gate.log
             build/contrib_check/summary.md
             build/contrib_check/gate_list.err
+            build/contrib_check/selected_steps.txt
+            build/contrib_check/gate_ledger.jsonl
+            build/contrib_check/contributor-diagnostics.md
+            build/contrib_check/step-logs/**
           if-no-files-found: warn
           retention-days: 14
