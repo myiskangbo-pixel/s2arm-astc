@@ -44,29 +44,7 @@ o=$(python3 $D $R 2>&1); r=$?
 ck "④b 补进对照表后 → 退出 0（${r}）、提示 1 条可收紧" '[ $r = 0 ] && grep -q "基线里 1 条已补上，可跑 --baseline 收紧" <<< "$o"'
 ck "⑤ tests/ 下的不扫" '! grep -q "测试里的中文" <<< "$o"'
 o=$(python3 $D $H 2>&1); r=$?
-ck "⑥ 真仓库：新增 0 处（rc=$r）" '[ $r = 0 ] && grep -q "新增 0 处" <<< "$o"'
-mkdir -p $R/launchers/shared/l10n; F=$R/launchers/shared/l10n/fr.json
-printf '{\n "language": "fr",\n "text": {\n  "甲句": "A"\n },\n "放错层的句子": "Mal placé"\n}\n' > $F
-o=$(python3 $D $R 2>&1); r=$?
-ck "⑦a 顶层中文键 → 退出 1（${r}）、点名 fr.json「放错层的句子」" '[ $r = 1 ] && grep -q "l10n/fr.json 顶层有中文键.*「放错层的句子」" <<< "$o" && grep -q "放错层 1 处" <<< "$o"'
-printf '{\n "language": "fr",\n "text": {\n  "甲句": "A",\n  "放错层的句子": "Mal placé"\n }\n}\n' > $F
-o=$(python3 $D $R 2>&1); r=$?
-ck "⑦b 挪进 text 后 → 退出 0（${r}）、放错层 0 处" '[ $r = 0 ] && grep -q "放错层 0 处" <<< "$o"'
-o=$(python3 $D $H 2>&1)
-ck "⑦c 真仓库：放错层 0 处" 'grep -q "放错层 0 处" <<< "$o"'
-[ $bad = 0 ] && echo "jobs_l10n_lint 单测全过" || { echo "jobs_l10n_lint 单测有不通"; exit 1; }
-\n'*}；末行：${o##*
-mkdir -p $R/launchers/shared/l10n; F=$R/launchers/shared/l10n/fr.json
-printf '{\n "language": "fr",\n "text": {\n  "甲句": "A"\n },\n "放错层的句子": "Mal placé"\n}\n' > $F
-o=$(python3 $D $R 2>&1); r=$?
-ck "⑦a 顶层中文键 → 退出 1（${r}）、点名 fr.json「放错层的句子」" '[ $r = 1 ] && grep -q "l10n/fr.json 顶层有中文键.*「放错层的句子」" <<< "$o" && grep -q "放错层 1 处" <<< "$o"'
-printf '{\n "language": "fr",\n "text": {\n  "甲句": "A",\n  "放错层的句子": "Mal placé"\n }\n}\n' > $F
-o=$(python3 $D $R 2>&1); r=$?
-ck "⑦b 挪进 text 后 → 退出 0（${r}）、放错层 0 处" '[ $r = 0 ] && grep -q "放错层 0 处" <<< "$o"'
-o=$(python3 $D $H 2>&1)
-ck "⑦c 真仓库：放错层 0 处" 'grep -q "放错层 0 处" <<< "$o"'
-[ $bad = 0 ] && echo "jobs_l10n_lint 单测全过" || { echo "jobs_l10n_lint 单测有不通"; exit 1; }
-\n'}）" '[ $r = 0 ] && grep -q "新增 0 处" <<< "$o"'
+ck "⑥ 真仓库：新增 0 处（${o##*$'\n'}）" '[ $r = 0 ] && grep -q "新增 0 处" <<< "$o"'
 mkdir -p $R/launchers/shared/l10n; F=$R/launchers/shared/l10n/fr.json
 printf '{\n "language": "fr",\n "text": {\n  "甲句": "A"\n },\n "放错层的句子": "Mal placé"\n}\n' > $F
 o=$(python3 $D $R 2>&1); r=$?
