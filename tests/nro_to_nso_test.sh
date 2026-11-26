@@ -125,7 +125,7 @@ EOF
 ck "⑦b 分块 0x40（zstd 帧与原样 NRO 都跨块边界）：表与 NSO 逐字节相同" 'cmp -s "$T/o7/nro_modules.tsv" "$T/o7b/nro_modules.tsv" && cmp -s "$T/o7/nro1" "$T/o7b/nro1" && cmp -s "$T/o7/nro2" "$T/o7b/nro2"'
 mkdir -p "$T/r7c/data"; cp "$T/r7/a.nro" "$T/r7c/"; cp "$T/r7/data/big.arc" "$T/r7c/data/"
 python3 "$H/runtime/rewriter/nro_to_nso.py" "$T/r7c" "$T/o7c" > /dev/null 2>&1; r7c=$?
-ck "⑦c 没有 .nrr = 旧行为：只有 nro0 = a.nro（实得 ${r7c}：$(grep -v '^#' "$T/o7c/nro_modules.tsv" 2>/dev/null | cut -f1,5 | tr '\n\t' '; ')）" "[ $r7c = 0 ] && [ \"\$(grep -v '^#' \"$T/o7c/nro_modules.tsv\")\" = \"\$(echo \"\$E7\" | head -1)\" ] && [ \"\$(ls -A \"$T/o7c\" | tr '\n' ' ')\" = 'nro0 nro_modules.tsv ' ]"
+ck "⑦c 没有 .nrr = 旧行为：只有 nro0 = a.nro（实得 ${r7c}：$(grep -v '^#' "$T/o7c/nro_modules.tsv" 2>/dev/null | cut -f1,5 | tr '\n\t' '; ')）" "[ $r7c = 0 ] && [ \"\$(grep -v '^#' \"$T/o7c/nro_modules.tsv\")\" = \"\$(echo \"\$E7\" | head -1)\" ] && [ \"\$(LC_ALL=C ls -A \"$T/o7c\" | tr '\n' ' ')\" = 'nro0 nro_modules.tsv ' ]"
 cp -R "$T/r7" "$T/r7d"; printf 'XRR0' | dd of="$T/r7d/.nrr/r.nrr" conv=notrunc 2> /dev/null
 python3 "$H/runtime/rewriter/nro_to_nso.py" "$T/r7d" "$T/o7d" > "$T/o7d.log" 2>&1; r7d=$?
 ck "⑦d 坏 NRR 跳过：退出 0、带【黄】、表只有 nro0 = a.nro（实得 ${r7d}）" "[ $r7d = 0 ] && grep -q '【黄】' \"$T/o7d.log\" && [ \"\$(grep -v '^#' \"$T/o7d/nro_modules.tsv\")\" = \"\$(echo \"\$E7\" | head -1)\" ]"
