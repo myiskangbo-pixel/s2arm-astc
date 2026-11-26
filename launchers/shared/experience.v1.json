@@ -711,7 +711,7 @@
       {"code": "diag_code_invalid", "severity": "error", "retryable": false, "recoverable": true,
        "title": {"zh-Hans": "诊断码无效", "en": "Invalid diagnostic code"},
        "detail": {"zh-Hans": "诊断码不对：请从帖子里完整复制那一整串（以 S2A-DIAG1- 开头），再粘一次。", "en": "The diagnostic code is invalid. Copy the complete code from the post, including its ending, and paste it again."},
-       "next_action": {"from": "pack/jobs/diagcode.py"}},
+       "next_action": {"from": "pack/jobs/errors.py"}},
       {"code": "artifact_invalid", "severity": "error", "retryable": false, "recoverable": true,
        "title": {"zh-Hans": "产物记录不完整", "en": "Artifact record invalid"},
        "detail": {"zh-Hans": "IPA 或资源包的产物账本校验没通过，原产物保留。", "en": "The IPA or resource-pack artifact record failed validation; the previous artifacts are kept."},
