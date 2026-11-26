@@ -108,8 +108,11 @@ def _decompress(data):
         from compression import zstd
         return zstd.decompress(data)
     except ImportError:
+        # stream_writer() intentionally omits the content-size field for large archives;
+        # decompress() cannot size its output buffer from such frames.
         import zstandard
-        return zstandard.ZstdDecompressor().decompress(data)
+        with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(data)) as reader:
+            return reader.read()
 
 
 def cache(c, gid):
