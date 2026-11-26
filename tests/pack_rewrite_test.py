@@ -400,14 +400,22 @@ class PackagingRewrite(unittest.TestCase):
         (tree / "pack").mkdir()
         shutil.copy2(ROOT / "pack/rewriter.py", tree / "pack/rewriter.py")
         command = [sys.executable, str(tree / "pack/rewriter.py"), "c-path"]
-        first = subprocess.run(command, env=self.env, capture_output=True, text=True, check=True)
+        # The copied checkout intentionally contains only source files. Pin the
+        # already-prepared dependency tree from the real checkout explicitly;
+        # do not rely on HOME / S2A_RUN_ROOT inherited from the CI host.
+        dep_result = subprocess.run([sys.executable, str(ROOT / "pack/rewriter.py"), "deps-path"],
+                                    env=self.env, capture_output=True, text=True)
+        self.assertEqual(dep_result.returncode, 0, dep_result.stdout + dep_result.stderr)
+        env = dict(self.env, S2A_REWRITER_DEPS=dep_result.stdout.strip())
+        first = subprocess.run(command, env=env, capture_output=True, text=True)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual(first.stdout.strip(), str(self.binary))
         with (tree / "runtime/rewriter/main.c").open("ab") as out:
-            out.write(b"\n/* changed source contents */\n")
+            out.write(b"\\n/* changed source contents */\\n")
         # The source changed while no Git commit or mtime contract was involved.
         # Rebuild from the changed bytes, even if a shared dependency fallback exists.
-        result = subprocess.run(command, env=self.env, capture_output=True, text=True,
-                                check=True, timeout=180)
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=180)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotEqual(result.stdout.strip(), str(self.binary))
         self.assertTrue(Path(result.stdout.strip()).is_file())
 
