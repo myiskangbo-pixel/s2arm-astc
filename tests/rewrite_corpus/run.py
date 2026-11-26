@@ -16,7 +16,7 @@ T = tempfile.mkdtemp(prefix='rwc')
 
 def assemble(name, src):
     s, o = os.path.join(T, name + '.s'), os.path.join(T, name + '.o')
-    open(s, 'w').write('.text\\n.p2align 2\\n' + src)
+    open(s, 'w').write('.text\n.p2align 2\n' + src)
     if os.name == 'nt':
         # Windows runners do not ship Apple's xcrun/otool. Assemble the same
         # AArch64 instructions as a freestanding ELF object, then extract only
@@ -41,7 +41,7 @@ def assemble(name, src):
     # Keep the Apple toolchain path on macOS; this also validates the original
     # Mach-O assembly route used by the golden corpus.
     subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-c', s, '-o', o], check=True, capture_output=True)
-    out = subprocess.run(['otool', '-t', o], check=True, capture_output=True, text=True).stdout.split('\\n')[2:]
+    out = subprocess.run(['otool', '-t', o], check=True, capture_output=True, text=True).stdout.split('\n')[2:]
     return [int(w, 16) for l in out for w in l.split()[1:]]
 
 def nso(code, ro_tabs, fde_len, path, tsz=0x1000):
