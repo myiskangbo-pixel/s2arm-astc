@@ -123,7 +123,8 @@ jobs:
           $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
           $clang = Join-Path $llvmBin 'clang.exe'
           $clangxx = Join-Path $llvmBin 'clang++.exe'
-          if (-not (Test-Path $clang) -or -not (Test-Path $clangxx)) {
+          $clangcl = Join-Path $llvmBin 'clang-cl.exe'
+          if (-not (Test-Path $clang) -or -not (Test-Path $clangxx) -or -not (Test-Path $clangcl)) {
             throw "Pinned LLVM compiler binaries missing from $llvmBin"
           }
           $clangLine = (& $clang --version | Select-Object -First 1)
@@ -142,11 +143,43 @@ jobs:
           if ($clangxxVersion -ne $clangVersion) {
             throw "clang / clang++ version mismatch: $clangVersion vs $clangxxVersion"
           }
+          $clangclLine = (& $clangcl --version | Select-Object -First 1)
+          if ($clangclLine -notmatch 'clang version (?<version>\d+(?:\.\d+)+)') {
+            throw "Unable to parse clang-cl version: $clangclLine"
+          }
+          if ([version]$Matches['version'] -ne $clangVersion) {
+            throw "clang-cl / clang version mismatch: $($Matches['version']) vs $clangVersion"
+          }
+
+          # The C rewriter requires both unsigned __int128 and max_align_t.
+          # Prove the selected Windows compiler supports the exact source types
+          # before invoking CMake or the packaging pipeline.
+          choco upgrade ninja --yes --no-progress
+          if (-not (Get-Command ninja.exe -ErrorAction SilentlyContinue)) {
+            throw 'Ninja is required for the deterministic Windows C rewriter build'
+          }
+          $probe = Join-Path $env:RUNNER_TEMP 's2a-rewriter-clang-probe.c'
+          $probeObj = Join-Path $env:RUNNER_TEMP 's2a-rewriter-clang-probe.obj'
+          @'
+          #include <stddef.h>
+          #include <stdint.h>
+          typedef unsigned __int128 Mask;
+          typedef union Alloc { max_align_t alignment; Mask mask; } Alloc;
+          int main(void) { return sizeof(Mask) == 16 && sizeof(Alloc) >= 16 ? 0 : 1; }
+          '@ | Set-Content -Path $probe -Encoding ascii
+          & $clangcl /nologo /std:c11 /c $probe "/Fo$probeObj"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $probeObj)) {
+            throw 'clang-cl cannot compile unsigned __int128 / max_align_t probe'
+          }
+
           $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "S2A_CC=$clang" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "S2A_CXX=$clangxx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "S2A_REWRITER_CC=$clangcl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           & $clang --version
           & $clangxx --version
+          & $clangcl --version
+          ninja --version
           cmake --version
           cargo --version
 
@@ -159,6 +192,42 @@ jobs:
       - name: Prepare pinned rewriter dependencies
         shell: pwsh
         run: python runtime/rewriter/prepare_deps.py build/rewriter-deps
+
+      - name: Build and verify Windows C rewriter with Clang
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:S2A_REWRITER_DEPS = Join-Path $env:GITHUB_WORKSPACE 'build\rewriter-deps'
+          $env:S2A_REWRITER_CC = Join-Path $env:ProgramFiles 'LLVM\bin\clang-cl.exe'
+
+          # Exercise the production c_path() entry: it must configure Ninja
+          # with Clang, build the CLI, and pass the full byte-for-byte corpus.
+          $rewriter = (& python -X utf8 pack/rewriter.py c-path | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $rewriter)) {
+            throw 'Production C rewriter build did not produce s2a-rewrite.exe'
+          }
+          $env:REW = $rewriter
+          python -X utf8 tests/rewrite_c_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # Build the public C API concurrency harness with the same compiler
+          # and CRT, then compare both threaded outputs to the checked-in goldens.
+          $apiBuild = Join-Path $env:GITHUB_WORKSPACE 'build\rewriter-api'
+          $cmakeArgs = @(
+            '-S', 'runtime/rewriter', '-B', $apiBuild, '-G', 'Ninja',
+            "-DCMAKE_C_COMPILER:FILEPATH=$env:S2A_REWRITER_CC",
+            "-DS2A_REWRITER_DEPS=$env:S2A_REWRITER_DEPS",
+            '-DCMAKE_BUILD_TYPE=Release', '-DS2A_REWRITER_API_TEST=ON',
+            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
+            '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW'
+          )
+          & cmake @cmakeArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & cmake --build $apiBuild --target s2a-rewrite s2a-rewrite-api-test --parallel 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:REW = Join-Path $apiBuild 's2a-rewrite.exe'
+          python -X utf8 tests/rewrite_c_api_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Download and verify Zstandard runtime
         shell: pwsh
