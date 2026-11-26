@@ -102,12 +102,6 @@ jobs:
           # compat/fetch_base.sh populates the pinned LibHacAlpha local feed.
           # Restore with the root mapping before the test switches to its empty
           # source list; the test itself then remains offline and deterministic.
-          dotnet restore tests/crosshost_stage/Producer.csproj \
-            --configfile nuget.config --disable-parallel -p:NuGetAudit=false
-          # Prime the services/romfs_index closure as well: ns2_dump/ns2_nup
-          # and crosshost producer fixtures build it in offline mode later.
-          dotnet restore services/romfs_index/romfs_index.csproj \
-            --configfile nuget.config --disable-parallel -p:NuGetAudit=false
           # The services gate consumes the same pinned IANA archives offline.
           bash services/systemdata/make_tzdata.sh --prepare-sources
           # Warm the offline NuGet cache used by ROMFS and Vulkan CPU-side gates.
