@@ -89,7 +89,7 @@ gate_cleanup() {
     mkdir -p "$GATE_DIAG_DIR" 2> /dev/null && cp -R "$L"/. "$GATE_DIAG_DIR"/ 2> /dev/null || :
   fi
   [ -n "$PLANM" ] || rm -rf "$L"
-  [ "$(cat "$GPF" 2> /dev/null)" = $ ] && rm -f "$GPF"
+  [ "$(cat "$GPF" 2> /dev/null)" = "$BASHPID" ] && rm -f "$GPF"
 }
 trap gate_cleanup EXIT
 # 同一棵树的 C# 编译串行（tools/dotnet_lock.c，11-10 判据去负载化：并行各步编同一批 compat/tree 工程共用 obj/ 互踩，MSB4018 / nupkg 被占 / CS0006）：
