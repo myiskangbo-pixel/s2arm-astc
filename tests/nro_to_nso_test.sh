@@ -112,7 +112,12 @@ EOF
 python3 "$H/runtime/rewriter/nro_to_nso.py" "$T/r7" "$T/o7" > "$T/o7.log" 2>&1; r7=$?
 ck "⑦ 有 NRR：退出 0（实得 ${r7}）" '[ $r7 = 0 ]'
 ck "⑦ 表 = A（a.nro）、D（原样@偏移）、B（zstd@偏移），C 与未出现的登记哈希不进表（实得：$(grep -v '^#' "$T/o7/nro_modules.tsv" 2>/dev/null | cut -f1,5 | tr '\n\t' '; ')）" "[ \"\$(grep -v '^#' \"$T/o7/nro_modules.tsv\" 2>/dev/null)\" = \"\$E7\" ]"
-ck "⑦ NSO 正文 = 原 NRO（nro1 = D、nro2 = B），输出目录只有 nro0–2 与表" '[ "$(tail -c +257 "$T/o7/nro1" 2>/dev/null | shasum -a 256)" = "$(shasum -a 256 < "$T/D.nro")" ] && [ "$(tail -c +257 "$T/o7/nro2" 2>/dev/null | shasum -a 256)" = "$(shasum -a 256 < "$T/B.nro")" ] && [ "$(ls -A "$T/o7" | tr "\n" " ")" = "nro0 nro1 nro2 nro_modules.tsv " ]'
+D_ACT=$(tail -c +257 "$T/o7/nro1" 2>/dev/null | shasum -a 256 | awk '{print $1}')
+D_EXP=$(shasum -a 256 < "$T/D.nro" | awk '{print $1}')
+B_ACT=$(tail -c +257 "$T/o7/nro2" 2>/dev/null | shasum -a 256 | awk '{print $1}')
+B_EXP=$(shasum -a 256 < "$T/B.nro" | awk '{print $1}')
+O7_FILES=$(ls -A "$T/o7" | tr '\n' ' ')
+ck "⑦ NSO 正文 = 原 NRO（D ${D_ACT}/${D_EXP}；B ${B_ACT}/${B_EXP}；文件：${O7_FILES}）" '[ "$D_ACT" = "$D_EXP" ] && [ "$B_ACT" = "$B_EXP" ] && [ "$O7_FILES" = "nro0 nro1 nro2 nro_modules.tsv " ]'
 python3 - "$H/runtime/rewriter" "$T/r7" "$T/o7b" > /dev/null 2>&1 <<'EOF'
 import sys; sys.path.insert(0, sys.argv[1]); import nro_to_nso as m
 m.CHUNK = 0x40; sys.exit(m.main(sys.argv[2:]))
