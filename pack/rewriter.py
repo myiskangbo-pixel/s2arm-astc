@@ -108,7 +108,8 @@ def c_path():
     source = ROOT / "runtime/rewriter"
     digest = hashlib.sha256(source_digest().encode() + b"\0")
     for value in (platform.system(), platform.machine(), *(os.environ.get(k, "") for k in
-                   ("CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "CMAKE_TOOLCHAIN_FILE", "MACOSX_DEPLOYMENT_TARGET"))):
+                   ("CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "CMAKE_TOOLCHAIN_FILE", "MACOSX_DEPLOYMENT_TARGET",
+                    "S2A_REWRITER_CC", "CMAKE_GENERATOR", "CMAKE_MAKE_PROGRAM"))):
         digest.update(value.encode() + b"\0")
     if os.name == "nt": digest.update(b"msvcrt=static\0")   # Windows 静态 C 运行库（下面 cmake 参数）进缓存键：旧的动态运行库那份不复用
     cache = Path(os.environ.get("S2A_REWRITER_CACHE", ROOT / "build/rewriter-cli")).resolve()
@@ -127,10 +128,36 @@ def c_path():
     # Each builder owns its temporary tree on the cache's filesystem. Rename
     # publishes a complete executable, including on filesystems without links.
     with tempfile.TemporaryDirectory(prefix=".build-", dir=cache) as tmp:
-        subprocess.run(["cmake", "-S", str(source), "-B", tmp,
-                        "-DS2A_REWRITER_DEPS=" + str(deps), "-DCMAKE_BUILD_TYPE=Release"]
-                       + (["-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW"] if os.name == "nt" else []),   # Windows 静态 C 运行库：玩家机不用另装 VC++ 运行库
-                       check=True, stdout=sys.stderr)
+        configure = ["cmake", "-S", str(source), "-B", tmp,
+                     "-DS2A_REWRITER_DEPS=" + str(deps), "-DCMAKE_BUILD_TYPE=Release"]
+        compiler = None
+        if os.name == "nt":
+            # MSVC cl.exe cannot compile this C11 implementation: it uses
+            # unsigned __int128. Do not let CMake silently select the Visual
+            # Studio generator/compiler; pin a real Clang or MinGW compiler.
+            compiler = (os.environ.get("S2A_REWRITER_CC") or shutil.which("clang-cl")
+                        or shutil.which("clang") or shutil.which("gcc"))
+            if not compiler:
+                raise ValueError("Windows C 改写器需要 clang-cl / clang / MinGW gcc；"
+                                 "请安装 LLVM + Ninja，或设置 S2A_REWRITER_CC")
+            if Path(compiler).name.lower() in ("cl", "cl.exe"):
+                raise ValueError("Windows C 改写器不支持 MSVC cl.exe（缺少 unsigned __int128）")
+            if not shutil.which("ninja"):
+                raise ValueError("Windows C 改写器固定使用 Ninja 生成器，但 PATH 中没有 ninja")
+            configure += ["-G", "Ninja", "-DCMAKE_C_COMPILER:FILEPATH=" + compiler,
+                          "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+                          "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW"]
+        subprocess.run(configure, check=True, stdout=sys.stderr)
+        if os.name == "nt":
+            cache_text = (Path(tmp) / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace")
+            if "CMAKE_GENERATOR:INTERNAL=Ninja" not in cache_text:
+                raise ValueError("Windows C 改写器 CMake 未采用 Ninja 生成器")
+            clang_id = "CMAKE_C_COMPILER_ID:INTERNAL=Clang"
+            gnu_id = "CMAKE_C_COMPILER_ID:INTERNAL=GNU"
+            if not (clang_id in cache_text or gnu_id in cache_text):
+                raise ValueError("Windows C 改写器 CMake 未采用 Clang/GNU；拒绝使用 MSVC")
+            if Path(compiler).name.lower().startswith("clang") and clang_id not in cache_text:
+                raise ValueError("Windows 指定了 Clang，但 CMake 未识别为 Clang")
         subprocess.run(["cmake", "--build", tmp, "--config", "Release", "--target", "s2a-rewrite", "--parallel", "2"],
                        check=True, stdout=sys.stderr)
         built = Path(tmp) / name
