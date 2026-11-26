@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BC → ASTC 预转包（出包时、目标是 Apple TV 等不支持 BC 压缩贴图的设备才调）。机制与包形态参考 brad-n/TVPort（MIT）dm/gfx/tools/bntx_astc.py：
+"""BC → ASTC 预转包（出包时、目标是 iOS/iPadOS、Apple TV 等不支持 BC 压缩贴图的设备才调）。机制与包形态参考 brad-n/TVPort（MIT）dm/gfx/tools/bntx_astc.py：
 在电脑上把游戏资源里的 BC 贴图逐平面（级 × 层）解成线性、用 Arm astc-encoder 编成 ASTC 4x4，写成一个按键排序、末尾带索引的只读包；
 运行时渲染器（graphics/metal/gal_tex.m「BC → ASTC」）上传 BC 数据时按同一口径算键查包，命中直接传 ASTC，不再在 CPU 上把 BC 整张解成未压缩。
 

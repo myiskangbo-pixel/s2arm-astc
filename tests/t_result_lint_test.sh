@@ -1,12 +1,12 @@
 #!/bin/bash
 # 门禁只看：tools/t_result_lint.py runtime/include/s2a_t_result.h runtime/tests/* graphics/nvn/tests/*
 # 单测结论行静态检查（tools/t_result_lint.py；11-07 维护者：warm-bump、buf-reg-scalable 单测全过、只因没打「✓ t_」被原生门禁判红）。约 2 秒。
-# 入队预检自动跑（tests/*lint*_test.sh）：① 本支对 origin/main 改到的 t_*.c|m 真查一遍（入队拦截就是这一条）。夹具期望按规则手写：
+# 入队预检自动跑（tests/*lint*_test.sh）：① 本支对门禁基线改到的 t_*.c|m 真查一遍（入队拦截就是这一条）；GATE_SCAN_BASE 由自检 / 列车传入，单独运行时回退 origin/main。夹具期望按规则手写：
 #   ② 写成「t_x 全过」（warm-bump 原样，没有 ✓）→ 红、点名文件与写法；③ 字面「✓ t_x」/ S2A_T_RESULT("t_x", bad) / 三元「"✓"」+ t_x / .mk 里 echo「✓ t_x」→ 都不红
 #   ④ 共用宏真编真跑：bad=0 打「✓ t_demo：全过」退 0；bad=2 打「✗ t_demo：2 项不通」退 1
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0; trap 'rm -rf "$T"' EXIT
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
-o1=$(cd "$H" && python3 tools/t_result_lint.py 2>&1); r1=$?
+o1=$(cd "$H" && python3 tools/t_result_lint.py --base "${GATE_SCAN_BASE:-origin/main}" 2>&1); r1=$?
 ck "① 本支改到的单测都有结论行（rc=${r1}；$(tail -1 <<< "$o1")）" '[ $r1 = 0 ]'
 mkdir -p "$T/runtime/tests" "$T/graphics/nvn/tests/mk"; cd "$T" || exit 1
 printf 'int main(void){int bad=0; printf(bad ? "t_wb 有不通\\n" : "t_wb 全过\\n"); return bad;}\n' > runtime/tests/t_wb.c

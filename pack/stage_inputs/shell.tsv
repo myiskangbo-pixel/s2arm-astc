@@ -73,6 +73,9 @@
 入	graphics/nvn/gfx/tex/nvn_bcd_msl.h
 入	graphics/nvn/gfx/tex/nvn_bcdec.c
 入	graphics/nvn/gfx/tex/nvn_bcdec.h
+入	graphics/nvn/gfx/tex/nvn_bc_soft.c
+入	graphics/nvn/gfx/tex/nvn_bc_soft.h
+入	graphics/nvn/gfx/tex/nvn_bc_tables.h
 入	graphics/nvn/gfx/tex/nvn_deswizzle.c
 入	graphics/nvn/gfx/tex/nvn_deswizzle.h
 入	graphics/nvn/gfx/tex/nvn_deswizzle_gpu.h

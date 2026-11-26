@@ -79,8 +79,33 @@ if [ -n "$CHG" ]; then
   [ "$(gate_tier "$(tr ' ' '\n' < <(printf '%s\n' "$CHG"))")" != doc ] || TIER=doc
 fi
 # 远端那一份（GATE_PLAN 非空）把每步结果写进仓库里的 GATE_OUT（build/ 下、被忽略），本机经 维护方工具 --pull 拉回；本机那份用临时目录
-if [ -n "$PLANM" ]; then L=$R/${GATE_OUT:?远端计划要给 GATE_OUT}; rm -rf "$R/build/gate_out"; mkdir -p "$L"; trap '[ "$(cat "$GPF" 2> /dev/null)" = $$ ] && rm -f "$GPF"' EXIT
-else L=$(mktemp -d); trap 'rm -rf "$L"; [ "$(cat "$GPF" 2> /dev/null)" = $$ ] && rm -f "$GPF"' EXIT; fi
+if [ -n "$PLANM" ]; then L=$R/${GATE_OUT:?远端计划要给 GATE_OUT}; rm -rf "$R/build/gate_out"; mkdir -p "$L"
+else L=$(mktemp -d); fi
+gate_cleanup() {
+  local active f p
+  if [ -n "${HB:-}" ]; then pkill -P "$HB" 2> /dev/null; kill "$HB" 2> /dev/null; fi
+  # A TERM handler has already stopped active timeout process groups. Give
+  # their wrappers a few seconds to flush the final diagnostic lines.
+  if [ -z "$PLANM" ]; then
+    for _ in 1 2 3 4 5; do
+      active=0
+      for f in "$L"/*.tp; do
+        [ -f "$f" ] || continue
+        p=$(cat "$f" 2> /dev/null); [ -n "$p" ] && kill -0 "$p" 2> /dev/null && active=1
+      done
+      [ "$active" = 0 ] && break
+      sleep 1
+    done
+  fi
+  # CI may be cancelled while one gate step is still running. Preserve the
+  # per-step logs and process markers before removing the private temp tree.
+  if [ -z "$PLANM" ] && [ -n "${GATE_DIAG_DIR:-}" ] && [ -d "$L" ]; then
+    mkdir -p "$GATE_DIAG_DIR" 2> /dev/null && cp -R "$L"/. "$GATE_DIAG_DIR"/ 2> /dev/null || :
+  fi
+  [ -n "$PLANM" ] || rm -rf "$L"
+  [ "$(cat "$GPF" 2> /dev/null)" = "$BASHPID" ] && rm -f "$GPF"
+}
+trap gate_cleanup EXIT
 # 同一棵树的 C# 编译串行（tools/dotnet_lock.c，11-10 判据去负载化：并行各步编同一批 compat/tree 工程共用 obj/ 互踩，MSB4018 / nupkg 被占 / CS0006）：
 #   开头现编到 $L/bin/dotnet，各步 DOTNET 与 PATH 都指它（各步大多按 ${DOTNET:-~/.dotnet/dotnet} 调，少数直接调 dotnet）；真 dotnet 记在 S2A_DOTNET_REAL。
 #   用编出来的程序而不是脚本：脚本解释器受 SIP 保护会清掉 DYLD_*（t_native_provider 靠 DYLD_INSERT_LIBRARIES 注入，11-11 经脚本包装后服务层红）。
@@ -251,6 +276,20 @@ if [ -n "$LINUX_LOCAL" ]; then
 fi
 MACN=${#MACS[@]}; MACL=; [ "$MACN" -gt 0 ] && { MACL=$(printf '%s、' "${MACS[@]}"); MACL="；待 Mac 证 ${MACN} 步：${MACL%、}"; }
 N=${#STEPS[@]}
+# Persist a stable step-number -> name map with the diagnostic copy. This makes an
+# interrupted run actionable: .tk means queued for a token, .started without
+# .rc means the exact step was running when the runner stopped it.
+if [ -n "${GATE_DIAG_DIR:-}" ]; then
+  {
+    printf 'index\tstep\tlimit\n'
+    if [ "$N" -gt 0 ]; then
+      for i in $(seq 1 "$N"); do
+        s=${STEPS[$((i - 1))]}; name=${s%%$'\t'*}; lim=${s##*$'\t'}
+        printf '%s\t%s\t%s\n' "$i" "$name" "$lim"
+      done
+    fi
+  } > "$L/steps.tsv"
+fi
 # 0 步（GATE_RERUN 只跑的步本树都不涉及，如列车逐支核里这支路由不到红步）：直接绿退出——下面的 $(seq 1 $N) 在 macOS 上 N=0 时打出「1 0」，会越界取 STEPS
 # 待 Mac 证的步另起一行机读（tab 分隔），总结行写成「本机绿、待 Mac 证」——不许让读末行的人 / 脚本把它当成整份门禁绿
 macsum() { [ "$MACN" -gt 0 ] || return 0; printf '待Mac证'; printf '\t%s' "${MACS[@]}"; echo; }
@@ -436,7 +475,7 @@ detwait() {   # 等本机步（LJ）跑完；期间有确定性步骤红 → 早
 #   每 GATE_BEAT_S（缺省 300）秒打一行进度；disown 免得下面的 wait 等它，门禁主进程没了自己退出（被外层杀时不留孤儿）
 #   sleep 不带门禁的标准输出（11-05：原写法 kill 心跳子 shell 后它睡着的 sleep 仍开着输出管道，外层 $(bash tools/gate.sh) 每份白等至多 GATE_BEAT_S 秒，
 #   remote_test / gate_budget_test 等起假门禁的单测在 gate-host 上全部跑满 600 秒）；门禁任何一条路退出都收心跳（含它的 sleep）
-GP=$$; ( while sleep "${GATE_BEAT_S:-300}" > /dev/null 2>&1 < /dev/null; kill -0 $GP 2> /dev/null; do echo "门禁进度 $(date '+%H:%M:%S')：本份已出 $(ls "$L"/*.rc 2> /dev/null | wc -l | tr -d ' ') 个步结论，其余仍在跑 / 排队"; done ) & HB=$!; disown $HB 2> /dev/null; trap 'pkill -P $HB 2> /dev/null; kill $HB 2> /dev/null' EXIT
+GP=$$; ( while sleep "${GATE_BEAT_S:-300}" > /dev/null 2>&1 < /dev/null; kill -0 $GP 2> /dev/null; do echo "门禁进度 $(date '+%H:%M:%S')：本份已出 $(ls "$L"/*.rc 2> /dev/null | wc -l | tr -d ' ') 个步结论，其余仍在跑 / 排队"; done ) & HB=$!; disown $HB 2> /dev/null; trap gate_cleanup EXIT
 echo $HB > "$L/hb.pid"; [ -f tools/gate_reap.py ] && python3 tools/gate_reap.py $$ "$L" 2> /dev/null   # 收尸进程：本主进程被 KILL 时停掉在跑的步与心跳（见 tools/gate_reap.py）
 # 本机那份：整步本机的 + 拆出来的子项；gate-host 那份一次 维护方工具 跑完（带 @gate 共享数据，结果目录拉回 $L/r），两边同时跑
 for i in $(seq 1 $N); do s=${STEPS[$((i - 1))]}; [ "${WH[$i]}" = 本机 ] && { r1=${s#*	}; c=${r1%	*}

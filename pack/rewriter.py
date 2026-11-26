@@ -38,6 +38,56 @@ def source_digest():
     return digest.hexdigest()
 
 
+
+def cmake_compiler_info(build_dir, language):
+    """Read compiler identity from CMake's generated metadata, not CMakeCache.txt."""
+    build = Path(build_dir)
+    files = sorted((build / "CMakeFiles").glob(f"*/CMake{language}Compiler.cmake"))
+    if len(files) != 1:
+        raise ValueError(
+            f"Windows C 改写器 CMake 未生成唯一的 {language} 编译器元数据（找到 {len(files)} 个）"
+        )
+    path = files[0]
+    content = path.read_text(encoding="utf-8", errors="replace")
+
+    def value(name):
+        prefix = f'set({name} "'
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith(prefix):
+                return line[len(prefix):].split('"', 1)[0]
+        return ""
+
+    compiler_id = value(f"CMAKE_{language}_COMPILER_ID")
+    frontend = value(f"CMAKE_{language}_COMPILER_FRONTEND_VARIANT")
+    if not compiler_id:
+        raise ValueError(f"Windows C 改写器无法从 {path} 读取 CMAKE_{language}_COMPILER_ID")
+    return compiler_id, frontend
+
+
+def validate_windows_cmake(build_dir):
+    build = Path(build_dir)
+    cache = build / "CMakeCache.txt"
+    if not cache.is_file():
+        raise ValueError("Windows C 改写器 CMake 缺少 CMakeCache.txt")
+    cache_text = cache.read_text(encoding="utf-8", errors="replace")
+    if "CMAKE_GENERATOR:INTERNAL=Ninja" not in cache_text:
+        raise ValueError("Windows C 改写器 CMake 未采用 Ninja 生成器")
+
+    # CMAKE_<LANG>_COMPILER_ID / FRONTEND_VARIANT are configure variables.
+    # CMake writes them to CMakeFiles/<version>/CMake{C,CXX}Compiler.cmake,
+    # not to CMakeCache.txt; reading the cache caused a false MSVC rejection.
+    c_id, c_front = cmake_compiler_info(build, "C")
+    cxx_id, cxx_front = cmake_compiler_info(build, "CXX")
+    if c_id not in ("Clang", "GNU") or cxx_id not in ("Clang", "GNU"):
+        raise ValueError(
+            "Windows C 改写器要求 C/C++ 编译器 ID 均为 Clang/GNU，"
+            f"实际 C={c_id or '未知'}，CXX={cxx_id or '未知'}"
+        )
+    if c_front and cxx_front and c_front != cxx_front:
+        raise ValueError(f"Windows C 改写器 C/C++ 前端不一致：{c_front} / {cxx_front}")
+    return c_id, c_front, cxx_id, cxx_front
+
 def app_runtime():
     """Recognize only the Python shipped in the fixed S2Arm.app Runtime layout."""
     exe = Path(sys.executable).absolute()
@@ -108,7 +158,8 @@ def c_path():
     source = ROOT / "runtime/rewriter"
     digest = hashlib.sha256(source_digest().encode() + b"\0")
     for value in (platform.system(), platform.machine(), *(os.environ.get(k, "") for k in
-                   ("CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "CMAKE_TOOLCHAIN_FILE", "MACOSX_DEPLOYMENT_TARGET"))):
+                   ("CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "CMAKE_TOOLCHAIN_FILE", "MACOSX_DEPLOYMENT_TARGET",
+                    "S2A_REWRITER_CC", "S2A_REWRITER_CXX", "CMAKE_GENERATOR", "CMAKE_MAKE_PROGRAM"))):
         digest.update(value.encode() + b"\0")
     if os.name == "nt": digest.update(b"msvcrt=static\0")   # Windows 静态 C 运行库（下面 cmake 参数）进缓存键：旧的动态运行库那份不复用
     cache = Path(os.environ.get("S2A_REWRITER_CACHE", ROOT / "build/rewriter-cli")).resolve()
@@ -127,10 +178,49 @@ def c_path():
     # Each builder owns its temporary tree on the cache's filesystem. Rename
     # publishes a complete executable, including on filesystems without links.
     with tempfile.TemporaryDirectory(prefix=".build-", dir=cache) as tmp:
-        subprocess.run(["cmake", "-S", str(source), "-B", tmp,
-                        "-DS2A_REWRITER_DEPS=" + str(deps), "-DCMAKE_BUILD_TYPE=Release"]
-                       + (["-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW"] if os.name == "nt" else []),   # Windows 静态 C 运行库：玩家机不用另装 VC++ 运行库
-                       check=True, stdout=sys.stderr)
+        configure = ["cmake", "-S", str(source), "-B", tmp,
+                     "-DS2A_REWRITER_DEPS=" + str(deps), "-DCMAKE_BUILD_TYPE=Release"]
+        compiler = None
+        if os.name == "nt":
+            # MSVC cl.exe cannot compile this C11 implementation: it uses
+            # unsigned __int128. Do not let CMake silently select the Visual
+            # Studio generator/compiler; pin a real Clang or MinGW compiler.
+            compiler = (os.environ.get("S2A_REWRITER_CC") or shutil.which("clang-cl")
+                        or shutil.which("clang") or shutil.which("gcc"))
+            if not compiler:
+                raise ValueError("Windows C 改写器需要 clang-cl / clang / MinGW gcc；"
+                                 "请安装 LLVM + Ninja，或设置 S2A_REWRITER_CC")
+            if Path(compiler).name.lower() in ("cl", "cl.exe"):
+                raise ValueError("Windows C 改写器不支持 MSVC cl.exe（缺少 unsigned __int128）")
+            # Capstone configures both C and C++; CMake must not auto-discover
+            # clang++ when C was explicitly pinned to clang-cl. That creates
+            # an unsupported GNU/MSVC frontend mix on Windows.
+            cxx_compiler = os.environ.get("S2A_REWRITER_CXX")
+            if not cxx_compiler:
+                compiler_name = Path(compiler).name.lower()
+                if compiler_name in ("clang-cl", "clang-cl.exe"):
+                    cxx_compiler = compiler
+                elif compiler_name in ("clang", "clang.exe"):
+                    cxx_compiler = shutil.which("clang++")
+                elif compiler_name in ("gcc", "gcc.exe"):
+                    cxx_compiler = shutil.which("g++")
+            if not cxx_compiler:
+                raise ValueError("Windows C 改写器找不到与 C 编译器匹配的 C++ 编译器；请设置 S2A_REWRITER_CXX")
+            if not shutil.which("ninja"):
+                raise ValueError("Windows C 改写器固定使用 Ninja 生成器，但 PATH 中没有 ninja")
+            configure += ["-G", "Ninja", "-DCMAKE_C_COMPILER:FILEPATH=" + compiler,
+                          "-DCMAKE_CXX_COMPILER:FILEPATH=" + cxx_compiler,
+                          "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+                          "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW"]
+        subprocess.run(configure, check=True, stdout=sys.stderr)
+        if os.name == "nt":
+            c_id, c_front, cxx_id, cxx_front = validate_windows_cmake(tmp)
+            print(
+                "Windows C 改写器 CMake 编译器："
+                f"C={c_id}/{c_front or 'unknown'}，"
+                f"CXX={cxx_id}/{cxx_front or 'unknown'}，生成器=Ninja",
+                file=sys.stderr,
+            )
         subprocess.run(["cmake", "--build", tmp, "--config", "Release", "--target", "s2a-rewrite", "--parallel", "2"],
                        check=True, stdout=sys.stderr)
         built = Path(tmp) / name

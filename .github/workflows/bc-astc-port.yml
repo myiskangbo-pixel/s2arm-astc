@@ -8,6 +8,9 @@ on:
       - 'graphics/nvn/**'
       - 'tools/toolchain.sh'
       - 'tools/toolchain.env'
+      - 'pack/stage_inputs/shell.tsv'
+      - 'pack/shell/closure.py'
+      - 'tests/shell_csiblings_test.sh'
       - '.github/workflows/bc-astc-port.yml'
 
 permissions:
@@ -26,6 +29,12 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Check prebuilt shell input registration
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/shell_csiblings_test.sh
 
       - name: Build texture tests
         shell: bash
@@ -50,7 +59,7 @@ jobs:
 
   ios-metal-build:
     name: iOS ARM64 Metal static library
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 90
 
     steps:

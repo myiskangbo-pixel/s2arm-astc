@@ -1,0 +1,159 @@
+name: Contributor pre-merge self-check
+
+on:
+  pull_request:
+    paths:
+      - 'pack/stage_inputs/shell.tsv'
+      - 'pack/shell/closure.py'
+      - 'pack/rewriter.py'
+      - 'runtime/rewriter/**'
+      - 'tests/rewriter_cmake_metadata_test.py'
+      - 'tests/shell_csiblings_test.sh'
+      - 'tools/contrib_check.sh'
+      - 'tools/contrib_diag.py'
+      - 'tools/doctor.sh'
+      - 'tools/gate.sh'
+      - 'tools/gate_plan.sh'
+      - 'tools/gate_route.py'
+      - 'tools/gate_decl.py'
+      - 'tools/contrib_tools.tsv'
+      - 'tools/contrib_layer2.tsv'
+      - 'tools/idle_timeout.sh'
+      - 'compat/**'
+      - 'tests/dev_run_test.sh'
+      - 'tests/fake_*.py'
+      - 'tools/dev_run.sh'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contrib-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  contributor-check:
+    name: Contributor self-check (macOS)
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout PR head and full history
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up .NET SDK 10.0.403
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.403'
+
+      - name: Install Bash 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list --versions bash >/dev/null 2>&1 || brew install bash
+          echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare pinned Python and rewriter dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The gate and several tests intentionally use the repository's canonical
+          # contributor interpreter path; installing into setup-python's global
+          # interpreter alone leaves ~/.s2arm/venv missing.
+          mkdir -p "$HOME/.s2arm"
+          python3 -m venv "$HOME/.s2arm/venv"
+          PY="$HOME/.s2arm/venv/bin/python3"
+          "$PY" -m pip install --disable-pip-version-check \
+            -r tools/rewriter-requirements.txt \
+            -r pack/fonts/requirements.txt \
+            -r launchers/macos/requirements-runtime.txt \
+            ruff==0.17.1
+          "$PY" runtime/rewriter/prepare_deps.py build/rewriter-deps
+          # Full-tier contributor checks verify the pinned upstream Ryujinx
+          # object; a full-history checkout of this fork does not contain it.
+          bash compat/fetch_base.sh
+
+      - name: Verify self-check prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash --version | head -1
+          python3 --version
+          dotnet --list-sdks
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --find metal
+          bash -n tools/gate.sh tools/contrib_check.sh
+          python3 -m py_compile tools/contrib_diag.py
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          printf 'index\tstep\tlimit\n1\tfixture-green\t60\n2\tfixture-pending\t60\n' > "$tmp/steps.tsv"
+          printf '0 1\n' > "$tmp/1.rc"
+          : > "$tmp/2.started"
+          printf 'last diagnostic line\n' > "$tmp/2.log"
+          python3 tools/contrib_diag.py "$tmp" "$tmp/summary.md"
+          grep -q 'fixture-pending' "$tmp/summary.md"
+          grep -q 'last diagnostic line' "$tmp/summary.md"
+
+      - name: Deterministic Ryujinx patch replay diagnosis
+        shell: bash
+        continue-on-error: true
+        run: bash compat/replay_diagnose.sh "$(git rev-parse HEAD)"
+
+      - name: Verify generated synthetic system archive
+        shell: bash
+        run: python3 tests/sysdata_synth_tar_test.py
+
+      - name: Run contributor self-check against PR base
+        shell: bash
+        env:
+          CONTRIB_HOST: local
+          # A dedicated CI runner should not queue behind local interactive work.
+          # Give the complete gate 90 minutes before the wrapper's hard stop;
+          # keep the GitHub job at 120 minutes so diagnostics can still upload.
+          CONTRIB_TIMEOUT_S: '1800'
+          S2A_GATE_LOAD_WAIT_S: '0'
+          S2A_GATE_CPU_IDLE_MIN: '0'
+          GATE_BEAT_S: '60'
+          GATE_DIAG_DIR: ${{ github.workspace }}/build/contrib_check/step-logs
+          GATE_LEDGER: ${{ github.workspace }}/build/contrib_check/gate_ledger.jsonl
+          CONTRIB_BASE_RERUN: '1'
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.s2arm/venv/bin:$PATH"
+          export S2A_PY="$HOME/.s2arm/venv/bin/python3"
+          export S2A_PYTHON="$S2A_PY"
+          bash tools/contrib_check.sh \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --host local
+
+      - name: Summarize interrupted contributor diagnostics
+        if: always()
+        shell: bash
+        run: python3 tools/contrib_diag.py build/contrib_check/step-logs build/contrib_check/contributor-diagnostics.md
+
+      - name: Upload contributor self-check diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contributor-self-check-${{ github.run_id }}
+          path: |
+            build/contrib_check/gate.log
+            build/contrib_check/base_gate.log
+            build/contrib_check/summary.md
+            build/contrib_check/gate_list.err
+            build/contrib_check/selected_steps.txt
+            build/contrib_check/gate_ledger.jsonl
+            build/contrib_check/contributor-diagnostics.md
+            build/contrib_check/step-logs/**
+          if-no-files-found: warn
+          retention-days: 14

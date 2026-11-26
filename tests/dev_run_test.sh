@@ -198,9 +198,10 @@ lag_win() { sed_edit "s/^ACT_S=.*/ACT_S=$1/" $J/job.env; }
 lag_win 120; FAKE_LAG_FRAMES=40 FAKE_HB_EVERY=999999 S2A_FRAME_RECHECK=0 S2A_STALL_S=8 run
 ck "反证：只认滞后的 frames 副本 → 红「出图停在第 40 帧」（实得：${RES:0:90}）" '[[ $RES == RESULT=red*出图停在第\ 40\ 帧* ]]'
 # ② 帧号取 frames 行数与 host.log 心跳里大的那个：副本停在 40 帧、心跳在涨 → 不判停、照常收局
+# 只要求心跳帧号超过滞后副本末帧 40；并行 CI 下假 App 可能被调度器饿住，固定 >100 会把负载差异误报成功能失败。
 lag_win 12; FAKE_LAG_FRAMES=40 FAKE_HB_EVERY=10 S2A_STALL_S=8 run
 WN=$(grep -oE '收局：窗口 [0-9]+ 秒、[0-9]+ 帧' $OUT/run.log | tail -1 | grep -oE '、[0-9]+ 帧' | grep -oE '[0-9]+')
-ck "帧号按心跳走：副本停 40 帧、心跳在涨 → 不判「出图停在」、照常 done（窗口读数 ${WN:-?} 帧）" '[[ $RES == RESULT=done* ]] && ! grep -q "出图停在" $OUT/run.log && [ "${WN:-0}" -gt 100 ]'
+ck "帧号按心跳走：副本停 40 帧、心跳在涨 → 不判「出图停在」、照常 done（窗口读数 ${WN:-?} 帧）" '[[ $RES == RESULT=done* ]] && ! grep -q "出图停在" $OUT/run.log && [ "${WN:-0}" -gt 40 ]'
 # ③ 判红前重读不许凭空造帧：副本与心跳都静止 → 仍判红（重读只是重读，不是免死金牌）
 lag_win 120; FAKE_LAG_FRAMES=40 FAKE_HB_EVERY=999999 S2A_STALL_S=8 run
 ck "重读不凭空造帧：副本与心跳都静止 → 仍判红「出图停在第 40 帧」" '[[ $RES == RESULT=red*出图停在第\ 40\ 帧* ]]'

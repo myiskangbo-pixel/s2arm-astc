@@ -1,0 +1,356 @@
+name: Windows x64 S2Arm toolchain bundle
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-bundle.yml'
+      - 'launchers/windows/**'
+      - 'launchers/macos/prepare_build.py'
+      - 'pack/**'
+      - 'runtime/**'
+      - 'graphics/**'
+      - 'services/systemdata/**'
+      - 'tools/toolchain*'
+      - 'tests/astc_pack_test.py'
+      - 'tests/rewriter_cmake_metadata_test.py'
+      - 'tests/dev_run_test.sh'
+      - 'compat/tree/global.json'
+
+permissions:
+  contents: read
+
+jobs:
+  apple-inputs:
+    name: Build matching iOS Shell, Fonts and Tzdata
+    runs-on: xcode-27
+    timeout-minutes: 120
+    steps:
+      - name: Checkout full source and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.403'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Apple build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list --versions bash >/dev/null 2>&1 || brew install bash
+          brew list --versions cmake >/dev/null 2>&1 || brew install cmake
+          brew list --versions python@3.12 >/dev/null 2>&1 || brew install python@3.12
+          brew list --versions meson >/dev/null 2>&1 || brew install meson
+          brew list --versions ninja >/dev/null 2>&1 || brew install ninja
+
+      - name: Prepare pinned Apple build environment
+        shell: bash
+        run: python3 launchers/macos/prepare_build.py
+
+      - name: Build fonts, tzdata and iOS Shell inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/windows-inputs
+          export S2A_PY="$PWD/build/venv/bin/python3"
+          export S2A_GMAKE="$PWD/build/macos/gmake/bin/make"
+          "$S2A_PY" pack/fonts/make_open_fonts.py build/windows-inputs/Fonts
+          bash services/systemdata/make_tzdata.sh --prepare-sources
+          bash services/systemdata/make_tzdata.sh --bundle-to build/windows-inputs/Tzdata
+          bash pack/shell_build.sh build/windows-inputs/Shell
+
+      - name: Upload matching Apple inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle-apple-inputs
+          path: build/windows-inputs/**
+          if-no-files-found: error
+          retention-days: 3
+
+  windows-bundle:
+    name: Build and validate Windows x64 distribution
+    needs: apple-inputs
+    runs-on: windows-2025
+    timeout-minutes: 180
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
+    steps:
+      - name: Checkout full source and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download matching Apple inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-bundle-apple-inputs
+          path: build/windows-inputs
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.403'
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install LLVM 22 for MSVC STL compatibility
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # windows-2025 currently has LLVM 20.1.8 preinstalled. "choco install"
+          # leaves that older version in place; upgrade to the minimum supported
+          # compiler required by the runner's Visual Studio 18 MSVC STL headers.
+          choco upgrade llvm --version=22.1.8 --yes --no-progress
+          $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
+          $clang = Join-Path $llvmBin 'clang.exe'
+          $clangxx = Join-Path $llvmBin 'clang++.exe'
+          $clangcl = Join-Path $llvmBin 'clang-cl.exe'
+          if (-not (Test-Path $clang) -or -not (Test-Path $clangxx) -or -not (Test-Path $clangcl)) {
+            throw "Pinned LLVM compiler binaries missing from $llvmBin"
+          }
+          $clangLine = (& $clang --version | Select-Object -First 1)
+          if ($clangLine -notmatch 'clang version (?<version>\d+(?:\.\d+)+)') {
+            throw "Unable to parse clang version: $clangLine"
+          }
+          $clangVersion = [version]$Matches['version']
+          if ($clangVersion -lt [version]'22.0.0') {
+            throw "Clang 22 or newer is required by the MSVC STL; found $clangVersion"
+          }
+          $clangxxLine = (& $clangxx --version | Select-Object -First 1)
+          if ($clangxxLine -notmatch 'clang version (?<version>\d+(?:\.\d+)+)') {
+            throw "Unable to parse clang++ version: $clangxxLine"
+          }
+          $clangxxVersion = [version]$Matches['version']
+          if ($clangxxVersion -ne $clangVersion) {
+            throw "clang / clang++ version mismatch: $clangVersion vs $clangxxVersion"
+          }
+          $clangclLine = (& $clangcl --version | Select-Object -First 1)
+          if ($clangclLine -notmatch 'clang version (?<version>\d+(?:\.\d+)+)') {
+            throw "Unable to parse clang-cl version: $clangclLine"
+          }
+          if ([version]$Matches['version'] -ne $clangVersion) {
+            throw "clang-cl / clang version mismatch: $($Matches['version']) vs $clangVersion"
+          }
+
+          # The C rewriter requires both unsigned __int128 and max_align_t.
+          # Prove the selected Windows compiler supports the exact source types
+          # before invoking CMake or the packaging pipeline.
+          choco upgrade ninja --yes --no-progress
+          if (-not (Get-Command ninja.exe -ErrorAction SilentlyContinue)) {
+            throw 'Ninja is required for the deterministic Windows C rewriter build'
+          }
+          $probe = Join-Path $env:RUNNER_TEMP 's2a-rewriter-clang-probe.c'
+          $probeObj = Join-Path $env:RUNNER_TEMP 's2a-rewriter-clang-probe.obj'
+          @'
+          #include <stddef.h>
+          #include <stdint.h>
+          typedef unsigned __int128 Mask;
+          typedef union Alloc { max_align_t alignment; Mask mask; } Alloc;
+          int main(void) { return sizeof(Mask) == 16 && sizeof(Alloc) >= 16 ? 0 : 1; }
+          '@ | Set-Content -Path $probe -Encoding ascii
+          & $clangcl /nologo /std:c11 /c $probe "/Fo$probeObj"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $probeObj)) {
+            throw 'clang-cl cannot compile C11 unsigned __int128 / max_align_t probe'
+          }
+          $probeCpp = Join-Path $env:RUNNER_TEMP 's2a-rewriter-clang-probe.cpp'
+          $probeCppObj = Join-Path $env:RUNNER_TEMP 's2a-rewriter-clang-probe-cxx.obj'
+          @'
+          #include <stddef.h>
+          typedef unsigned __int128 Mask;
+          union Alloc { max_align_t alignment; Mask mask; };
+          int main() { return sizeof(Mask) == 16 && sizeof(Alloc) >= 16 ? 0 : 1; }
+          '@ | Set-Content -Path $probeCpp -Encoding ascii
+          & $clangcl /nologo /std:c++17 /c $probeCpp "/Fo$probeCppObj"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $probeCppObj)) {
+            throw 'clang-cl cannot compile the matching C++ frontend probe'
+          }
+
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "S2A_CC=$clang" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "S2A_CXX=$clangxx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "S2A_REWRITER_CC=$clangcl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "S2A_REWRITER_CXX=$clangcl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $clang --version
+          & $clangxx --version
+          & $clangcl --version
+          ninja --version
+          cmake --version
+          cargo --version
+
+      - name: Install pinned Python build requirements
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r launchers/macos/requirements-runtime.txt -r tools/rewriter-requirements.txt
+
+      - name: Prepare pinned rewriter dependencies
+        shell: pwsh
+        run: python runtime/rewriter/prepare_deps.py build/rewriter-deps
+
+      - name: Build and verify Windows C rewriter with Clang
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prepareLogDir = Join-Path $env:GITHUB_WORKSPACE 'build/windows/prepare-logs'
+          New-Item -ItemType Directory -Force -Path $prepareLogDir | Out-Null
+          $env:S2A_REWRITER_DEPS = Join-Path $env:GITHUB_WORKSPACE 'build/rewriter-deps'
+          $env:S2A_REWRITER_CC = Join-Path $env:ProgramFiles 'LLVM/bin/clang-cl.exe'
+          $env:S2A_REWRITER_CXX = Join-Path $env:ProgramFiles 'LLVM/bin/clang-cl.exe'
+
+          # Regression-test CMake's generated compiler metadata before running
+          # the production build path (compiler IDs are not CMakeCache entries).
+          $metadataLog = Join-Path $prepareLogDir 'rewriter-cmake-metadata-test.log'
+          python -X utf8 tests/rewriter_cmake_metadata_test.py 2>&1 | Tee-Object -FilePath $metadataLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # Exercise the production c_path() entry and preserve its complete
+          # CMake/compiler output as an artifact even when configuration fails.
+          $rewriterLog = Join-Path $prepareLogDir 'rewriter-c-path.log'
+          & python -X utf8 pack/rewriter.py c-path 2>&1 | Tee-Object -FilePath $rewriterLog
+          $rewriterExit = $LASTEXITCODE
+          if ($rewriterExit -ne 0) {
+            throw "Production C rewriter build failed (exit $rewriterExit); see $rewriterLog"
+          }
+          $rewriter = (Get-Content -Path $rewriterLog -Tail 1 | Out-String).Trim()
+          if (-not (Test-Path -LiteralPath $rewriter)) {
+            throw "Production C rewriter build did not produce s2a-rewrite.exe; see $rewriterLog"
+          }
+          $cygpath = Join-Path $env:ProgramFiles 'Git/usr/bin/cygpath.exe'
+          if (-not (Test-Path $cygpath)) { throw 'Git for Windows cygpath.exe missing' }
+          $rewriterPosix = (& $cygpath -u $rewriter | Out-String).Trim()
+          $env:S2A_PY = 'python'
+          $env:REW = $rewriterPosix
+          # These Windows-safe fixtures synthesize NSOs directly; the full
+          # xcrun/otool golden corpus remains on the macOS contributor runner.
+          bash tests/rewrite_target_test.sh 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-target.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bash tests/rewrite_win_sp_test.sh 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-win-sp.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:REW = $rewriter
+          python -X utf8 tests/rewrite_sdk_c_test.py 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-sdk-c.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # Build the public C API concurrency harness with the same compiler
+          # and CRT, then compare both threaded outputs to the checked-in goldens.
+          $apiBuild = Join-Path $env:GITHUB_WORKSPACE 'build/rewriter-api'
+          $cmakeArgs = @(
+            '-S', 'runtime/rewriter', '-B', $apiBuild, '-G', 'Ninja',
+            "-DCMAKE_C_COMPILER:FILEPATH=$env:S2A_REWRITER_CC",
+            "-DCMAKE_CXX_COMPILER:FILEPATH=$env:S2A_REWRITER_CXX",
+            "-DS2A_REWRITER_DEPS=$env:S2A_REWRITER_DEPS",
+            '-DCMAKE_BUILD_TYPE=Release', '-DS2A_REWRITER_API_TEST=ON',
+            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
+            '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW'
+          )
+          & cmake @cmakeArgs 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewriter-api-configure.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & cmake --build $apiBuild --target s2a-rewrite s2a-rewrite-api-test --parallel 2 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewriter-api-build.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:REW = Join-Path $apiBuild 's2a-rewrite.exe'
+          python -X utf8 tests/rewrite_c_api_test.py 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-c-api.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Download and verify Zstandard runtime
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'zstd-v1.5.7-win64.zip'
+          $extract = Join-Path $env:RUNNER_TEMP 'zstd-v1.5.7-win64'
+          Invoke-WebRequest -Uri 'https://github.com/meta/zstd/releases/download/v1.5.7/zstd-v1.5.7-win64.zip' -OutFile $zip
+          $actual = (Get-FileHash $zip -Algorithm SHA512).Hash.ToLowerInvariant()
+          $expected = 'a96dc5417943c03fa231bf2d6a586b7ae7254fa52fdc15d302f296b5ff88e1ff0f07120a720149eb82ea0f0c65444393ebf05d2ee1bd1db341b803ff65a2e675'
+          if ($actual -ne $expected) { throw "Zstandard archive SHA512 mismatch: $actual" }
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+          $exe = Get-ChildItem -Path $extract -Filter 'zstd.exe' -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'zstd.exe not found in verified archive' }
+          $env:S2A_RT_ZSTD = $exe.Directory.FullName
+          $env:S2A_REWRITER_DEPS = Join-Path $env:GITHUB_WORKSPACE 'build\rewriter-deps'
+          "S2A_RT_ZSTD=$env:S2A_RT_ZSTD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "S2A_REWRITER_DEPS=$env:S2A_REWRITER_DEPS" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if (-not (Test-Path 'C:\Program Files\Git\usr\bin\bash.exe')) { throw 'Git for Windows Bash missing' }
+
+      - name: Build self-contained Windows x64 distribution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          python -X utf8 launchers/windows/bundle_win.py build/s2arm-windows-x64 --shell build/windows-inputs/Shell --tzdata build/windows-inputs/Tzdata --fonts build/windows-inputs/Fonts 2>&1 | Tee-Object build/windows-bundle.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify bundled BC-ASTC4x4 toolchain
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\s2arm-windows-x64'
+          $dlls = @(Get-ChildItem (Join-Path $bundle 'Engine\Binaries\Prepare\astc') -Filter 'libbc2astc-*.dll' -ErrorAction SilentlyContinue)
+          if ($dlls.Count -lt 1) { throw 'BC-ASTC prebuilt DLL missing from Windows distribution' }
+          $env:S2A_PREBUILT_TOOLS = Join-Path $bundle 'Engine\Binaries\Prepare'
+          $python = Join-Path $bundle 'Runtime\python\python.exe'
+          $enginePack = Join-Path $bundle 'Engine\pack'
+          & $python -B -c "import sys; sys.path.insert(0, r'$enginePack'); import astc_pack; p=astc_pack.build_tool(); print('BC-ASTC DLL:', p); astc_pack.Lib(p); print('BC-ASTC DLL load: OK')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run packaged BC-ASTC4x4 synthetic RomFS and iOS delivery tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\\s2arm-windows-x64'
+          $env:S2A_PREBUILT_TOOLS = Join-Path $bundle 'Engine\\Binaries\\Prepare'
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'pack\\jobs'
+          $python = Join-Path $bundle 'Runtime\\python\\python.exe'
+          if (-not (Test-Path $python)) { throw 'Bundled Python runtime missing' }
+          & $python -B tests/astc_pack_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python -B pack/jobs/tests/test_ipa_astc.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Write bundle checksums
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\s2arm-windows-x64'
+          $out = Join-Path $bundle 'SHA256SUMS.txt'
+          Get-ChildItem -Path $bundle -File -Recurse | Where-Object { $_.FullName -ne $out } | Sort-Object FullName | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $relative = $_.FullName.Substring($bundle.Length + 1)
+            "$hash *$relative"
+          } | Set-Content -Path $out -Encoding ascii
+
+      - name: Upload Windows x64 distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2arm-windows-x64-bundle
+          path: build/s2arm-windows-x64/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Windows build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2arm-windows-bundle-logs
+          path: |
+            build/windows-bundle.log
+            build/windows/prepare-logs/**
+          if-no-files-found: warn
+          retention-days: 14

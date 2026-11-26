@@ -22,7 +22,7 @@ from rewrite_golden import Golden
 
 def main():
     binary = Path(os.environ['REW']).resolve()
-    harness = binary.with_name('s2a-rewrite-api-test')
+    harness = binary.with_name('s2a-rewrite-api-test.exe' if os.name == 'nt' else 's2a-rewrite-api-test')
     try:
         with tempfile.TemporaryDirectory(prefix='rewrite-api-') as tmp:
             t = Path(tmp); source = t / 'main'

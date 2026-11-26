@@ -103,6 +103,8 @@ done < <(printf '%s\n' "$ALL")
 # --list：只打第一层步骤清单（一行一步）就退出（单测 tests/gate_plan_same_test.sh 对拍列车清单用）
 [ -n "${CONTRIB_LIST_ONLY:-}" ] && { printf '%s\n' ${L1[@]+"${L1[@]}"}; exit 0; }
 # ⑤ 跑第一层：本机跑、只跑 L1（GATE_RERUN = 只跑这些步）；S2A_REPO 指本仓库（调度 / 列车脚本缺省认 ~/.s2arm/S2Arm，贡献者的克隆在别处）
+printf '%s\n' ${L1[@]+"${L1[@]}"} > "$OUT/selected_steps.txt"
+if [ -n "${GATE_DIAG_DIR:-}" ]; then rm -rf "$GATE_DIAG_DIR"; mkdir -p "$GATE_DIAG_DIR"; fi
 RC=0; SUM="（尚无步骤结论）"
 if [ ${#L1[@]} -gt 0 ]; then
   KEEP=$(printf '%s\t' "${L1[@]}"); KEEP=${KEEP%	}
