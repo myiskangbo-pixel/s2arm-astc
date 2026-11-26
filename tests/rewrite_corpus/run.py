@@ -5,7 +5,7 @@
 #   块里所有直接跳转（b / b.cond / cbz / cbnz / tbz / tbnz）中跳出本块的目标集合就是落点（各种分派的落地垫最后都是 b 原目标；块内的计算跳转只到本块的垫）；
 #   br 处本身没有入口时取它前面 0x40 内最近的入口（经典 / 通用相对表把 ldrsw…br 合成一处，入口在 ldrsw）。按值跳（尾调用 / blr）= 块里有 br / blr 寄存器且没有落点。
 # 输出：每例一行「通 / 不通 / 已知缺口 / 已知缺口已修」，末行「rewrite_corpus：N 例，通 a、已知缺口 b、已知缺口已修 c、不通 d」；退出 0 = 没有不通
-import os, re, struct, subprocess, sys, tempfile
+import os, re, shutil, struct, subprocess, sys, tempfile
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 H = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, H)
 from cases import CASES
@@ -16,9 +16,32 @@ T = tempfile.mkdtemp(prefix='rwc')
 
 def assemble(name, src):
     s, o = os.path.join(T, name + '.s'), os.path.join(T, name + '.o')
-    open(s, 'w').write('.text\n.p2align 2\n' + src)
+    open(s, 'w').write('.text\\n.p2align 2\\n' + src)
+    if os.name == 'nt':
+        # Windows runners do not ship Apple's xcrun/otool. Assemble the same
+        # AArch64 instructions as a freestanding ELF object, then extract only
+        # .text with the LLVM toolchain installed by windows-bundle.yml.
+        cc = os.environ.get('S2A_CC') or shutil.which('clang')
+        objcopy = shutil.which('llvm-objcopy')
+        if not objcopy and cc:
+            sibling = os.path.join(os.path.dirname(cc), 'llvm-objcopy.exe')
+            if os.path.isfile(sibling):
+                objcopy = sibling
+        if not cc or not objcopy:
+            raise RuntimeError('Windows ARM64 corpus requires clang and llvm-objcopy; set S2A_CC / PATH')
+        raw = os.path.join(T, name + '.text')
+        subprocess.run([cc, '--target=aarch64-none-elf', '-c', s, '-o', o],
+                       check=True, capture_output=True)
+        subprocess.run([objcopy, '--dump-section', '.text=' + raw, o],
+                       check=True, capture_output=True)
+        data = open(raw, 'rb').read()
+        if len(data) % 4:
+            raise RuntimeError(f'ARM64 .text length is not word-aligned: {len(data)}')
+        return list(struct.unpack('<%dI' % (len(data) // 4), data))
+    # Keep the Apple toolchain path on macOS; this also validates the original
+    # Mach-O assembly route used by the golden corpus.
     subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-c', s, '-o', o], check=True, capture_output=True)
-    out = subprocess.run(['otool', '-t', o], check=True, capture_output=True, text=True).stdout.split('\n')[2:]
+    out = subprocess.run(['otool', '-t', o], check=True, capture_output=True, text=True).stdout.split('\\n')[2:]
     return [int(w, 16) for l in out for w in l.split()[1:]]
 
 def nso(code, ro_tabs, fde_len, path, tsz=0x1000):
