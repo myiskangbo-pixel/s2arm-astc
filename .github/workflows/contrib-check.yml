@@ -88,6 +88,17 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
           xcrun --find metal
+          bash -n tools/gate.sh tools/contrib_check.sh
+          python3 -m py_compile tools/contrib_diag.py
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          printf 'index\tstep\tlimit\n1\tfixture-green\t60\n2\tfixture-pending\t60\n' > "$tmp/steps.tsv"
+          printf '0 1\n' > "$tmp/1.rc"
+          : > "$tmp/2.started"
+          printf 'last diagnostic line\n' > "$tmp/2.log"
+          python3 tools/contrib_diag.py "$tmp" "$tmp/summary.md"
+          grep -q 'fixture-pending' "$tmp/summary.md"
+          grep -q 'last diagnostic line' "$tmp/summary.md"
 
       - name: Deterministic Ryujinx patch replay diagnosis
         shell: bash
