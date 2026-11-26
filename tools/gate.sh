@@ -82,6 +82,7 @@ fi
 if [ -n "$PLANM" ]; then L=$R/${GATE_OUT:?远端计划要给 GATE_OUT}; rm -rf "$R/build/gate_out"; mkdir -p "$L"
 else L=$(mktemp -d); fi
 gate_cleanup() {
+  local active f p
   if [ -n "${HB:-}" ]; then pkill -P "$HB" 2> /dev/null; kill "$HB" 2> /dev/null; fi
   # A TERM handler has already stopped active timeout process groups. Give
   # their wrappers a few seconds to flush the final diagnostic lines.
