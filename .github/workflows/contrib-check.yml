@@ -75,16 +75,6 @@ jobs:
           brew list --versions bash >/dev/null 2>&1 || brew install bash
           echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
 
-      - name: Prime offline NuGet cache for crosshost producer test
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The test itself restores from an empty local feed; prefetch the pinned
-          # package here so the integration remains offline and deterministic.
-          dotnet restore tests/crosshost_stage/Producer.csproj \
-            --source https://api.nuget.org/v3/index.json \
-            --disable-parallel -p:NuGetAudit=false
-
       - name: Prepare pinned Python and rewriter dependencies
         shell: bash
         run: |
@@ -104,6 +94,16 @@ jobs:
           # Full-tier contributor checks verify the pinned upstream Ryujinx
           # object; a full-history checkout of this fork does not contain it.
           bash compat/fetch_base.sh
+
+      - name: Prime offline NuGet cache for crosshost producer test
+        shell: bash
+        run: |
+          set -euo pipefail
+          # compat/fetch_base.sh populates the pinned LibHacAlpha local feed.
+          # Restore with the root mapping before the test switches to its empty
+          # source list; the test itself then remains offline and deterministic.
+          dotnet restore tests/crosshost_stage/Producer.csproj \
+            --configfile nuget.config --disable-parallel -p:NuGetAudit=false
 
       - name: Verify self-check prerequisites
         shell: bash
