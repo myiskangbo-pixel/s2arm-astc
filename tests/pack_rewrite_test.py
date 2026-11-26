@@ -411,7 +411,7 @@ class PackagingRewrite(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual(first.stdout.strip(), str(self.binary))
         with (tree / "runtime/rewriter/main.c").open("ab") as out:
-            out.write(b"\\n/* changed source contents */\\n")
+            out.write(b"\n/* changed source contents */\n")
         # The source changed while no Git commit or mtime contract was involved.
         # Rebuild from the changed bytes, even if a shared dependency fallback exists.
         result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=180)
