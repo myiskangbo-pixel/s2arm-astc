@@ -93,7 +93,7 @@ class Context:
     logs = private   # 作业日志目录（core.Context.logs）
     def env(self): return dict(os.environ)
     def diagnostic(self, message, code="job_failed", **kwargs):
-        (self.private / "diagnostics.log").open("a", encoding="utf-8").write(f"{code}: {message}\\n")
+        (self.private / "diagnostics.log").open("a", encoding="utf-8").write(f"{code}: {message}\n")
     def run(self, args, log, env): subprocess.run(list(map(str,args)), env=env, check=True)
 bundle_engine.bundle_tzdata(Context(), pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[2]))
 PYBUNDLE
