@@ -69,8 +69,69 @@ rp=$(rew p1a p1 S2A_TARGET=android); rx=$(rew n1a n1 S2A_TARGET=android); rp1=$(
 r4=$(rew w4a w4 S2A_TARGET=android); r5=$(rew w5a w5 S2A_TARGET=android); r6=$(rew w6a w6 S2A_TARGET=android)
 r7=$(rew n2a n2 S2A_TARGET=android)
 for d in n1a n2a; do
-  if [ "$(gap_rows "$d")" = 0 ] || [ "$([ "$d" = n1a ] && echo "$rx" || echo "$r7")" != 3 ]; then
-    echo "--- DIAG $d rc=$([ "$d" = n1a ] && echo "$rx" || echo "$r7") ---"
+  drc=$r7; [ "$d" = n1a ] && drc=$rx
+  if [ "$drc" != 3 ] || ! grep -qv '^#\\|^
+[ "$ra" = 0 ] || tail -8 "$T/w1a.log"; [ "$rg" = 0 ] && tail -8 "$T/w2a.log"
+# 逐条看补丁区：岛入口块、全补丁区 sp 下方访存计数、指定形态检索
+dis() { local d=$1; shift; $PY - "$T/$d" "$@" <<'EOF'
+import re, struct, sys
+from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+d, mode = sys.argv[1], sys.argv[2]
+b = open(d + '/main.patched.bin', 'rb').read(); md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+hdr = {l.split('\t')[0][2:]: l.rstrip('\n').split('\t')[1] for l in open(d + '/main.fixups.tsv') if l.startswith('# ')}
+po = int(hdr['PATCH_OFF'], 16)
+if mode == 'blk':   # 0x100 处 B 指向的岛入口前 5 条 + 首个 ldr [sp,#] 行
+    w, = struct.unpack_from('<I', b, 0x100); assert w >> 26 == 0b000101, f'0x100 不是 B：{w:#x}'
+    imm = w & 0x3ffffff; t = 0x100 + 4 * (imm - (1 << 26) if imm >> 25 else imm); out = []
+    ins = list(md.disasm(b[t:t + 96], t))
+    out += [f'{i.mnemonic} {i.op_str}' for i in ins[:5]]
+    out += [f'{i.mnemonic} {i.op_str}' for i in ins if i.mnemonic == 'ldr' and 'sp,' in i.op_str][:1]
+    print(';'.join(out))
+elif mode == 'sp':  # 补丁区 sp 下方访存（写回 / 后索引移动 sp 的不算）
+    bad = []
+    for i in md.disasm(b[po:], po):
+        if not i.mnemonic.startswith(('ldr', 'str', 'ldp', 'stp', 'ldur', 'stur', 'ldxr', 'stxr', 'ldaxr', 'stlxr')): continue
+        if ']!' in i.op_str or '], #' in i.op_str: continue
+        if re.search(r'\[sp, #-', i.op_str):
+            bad.append(f'{i.address:#x}:{i.mnemonic} {i.op_str}')
+    print(f'below_sp={len(bad)}' + ('' if not bad else ' ' + ';'.join(bad[:3])))
+elif mode == 'has': # 补丁区第一条匹配 <mnemonic> <op 子串> 的指令
+    m = sys.argv[3]; sub = sys.argv[4]
+    hit = [f'{i.address:#x}:{i.mnemonic} {i.op_str}' for i in md.disasm(b[po:], po) if i.mnemonic == m and sub in i.op_str]
+    print(hit[0] if hit else '无')
+EOF
+}
+b1=$(dis w1a blk 2>&1); s1=$(dis w1a sp 2>&1)
+s2=$(dis p1a sp 2>&1); p1b=$(dis p1a has stur 'sp,' 2>&1)
+sp1=$(dis w1p sp 2>&1)
+b4=$(dis w4a blk 2>&1); s4=$(dis w4a sp 2>&1)
+b5=$(dis w5a blk 2>&1); s5=$(dis w5a sp 2>&1)
+b6=$(dis w6a blk 2>&1); s6=$(dis w6a sp 2>&1); h6=$(dis w6a has ldur 'sp,' 2>&1)
+abi() { grep -qx "# TARGET	$1" "$T/$2/main.fixups.tsv" && grep -qx "# REWRITE_ABI	$3" "$T/$2/main.fixups.tsv"; }
+gap_rows() { if [ -f "$T/$1/main.gaps.tsv" ]; then grep -cv '^#\|^$' "$T/$1/main.gaps.tsv"; else echo 0; fi; }
+ck "① 安卓 W1：0 缺口 sp-safe，进岛 STPRE，环内 ldr 偏移 0xf0→0x100，补丁区无 sp 下方访存（rc=${ra}；块：${b1}；sp：${s1}）" \
+   '[ "$ra" = 0 ] && abi android w1a android-sp-safe-v1 && [ "$(gap_rows w1a)" = 0 ] && [[ $b1 == "stp x0, x1, [sp, #-0x10]!"* ]] && [[ $b1 == *"ldr x0, [sp, #0x100]" ]] && [ "$s1" = "below_sp=0" ]'
+ck "② 安卓 W2：环内 sp 写回 → rc=3、窗口记缺口、产物照出（v0.3.1 拿不准不停，rc=${rg}）" \
+   '[ "$rg" = 3 ] && [ "$(gap_rows w2a)" -ge 1 ] && grep -q "0x100" "$T/w2a/main.gaps.tsv" && [ -e "$T/w2a/main.fixups.tsv" ] && [ -e "$T/w2a/main.patched.bin" ]'
+ck "③ 安卓 W3：无 sp 环 0 缺口 sp-safe（rc=${rn}）" \
+   '[ "$rn" = 0 ] && abi android w3a android-sp-safe-v1 && [ "$(gap_rows w3a)" = 0 ]'
+ck "④ 安卓 P1：直写点 str 写回平移成 stur（rc=${rp}；命中：${p1b}；sp：${s2}）" \
+   '[ "$rp" = 0 ] && abi android p1a android-sp-safe-v1 && [ "$(gap_rows p1a)" = 0 ] && [[ $p1b == *"stur x0, [sp, #0x10]" ]] && [ "$s2" = "below_sp=0" ]'
+ck "⑤ 安卓 N1：sp 上独占访存记缺口（rc=${rx}）" \
+   '[ "$rx" = 3 ] && [ "$(gap_rows n1a)" -ge 1 ] && [ -e "$T/n1a/main.patched.bin" ]'
+ck "⑥ 苹果 W1：负对照，仍用 sp 下方暂存、产物不变（rc=${rp1}；sp：${sp1}）" \
+   '[ "$rp1" = 0 ] && ! grep -q "# TARGET" "$T/w1p/main.fixups.tsv" && [ "${sp1#below_sp=}" != "$sp1" ] && [ "${sp1%% *}" != "below_sp=0" ]'
+ck "⑦ 安卓 W4：0 缺口 sp-safe，环内 ldr [sp] 平移 0→0x10（rc=${r4}；块：${b4}；sp：${s4}）" \
+   '[ "$r4" = 0 ] && abi android w4a android-sp-safe-v1 && [ "$(gap_rows w4a)" = 0 ] && [[ $b4 == "stp x0, x1, [sp, #-0x10]!"* ]] && [[ $b4 == *"ldr x0, [sp, #0x10]" ]] && [ "$s4" = "below_sp=0" ]'
+ck "⑧ 安卓 W5：0 缺口 sp-safe，环内 ldr [sp,#8] 平移 8→0x18（rc=${r5}；块：${b5}；sp：${s5}）" \
+   '[ "$r5" = 0 ] && abi android w5a android-sp-safe-v1 && [ "$(gap_rows w5a)" = 0 ] && [[ $b5 == "stp x0, x1, [sp, #-0x10]!"* ]] && [[ $b5 == *"ldr x0, [sp, #0x18]" ]] && [ "$s5" = "below_sp=0" ]'
+ck "⑨ 安卓 W6：0 缺口 sp-safe，进岛 STPRE 抬 32，环内 ldur 偏移 -8→0x18（rc=${r6}；块：${b6}；命中：${h6}；sp：${s6}）" \
+   '[ "$r6" = 0 ] && abi android w6a android-sp-safe-v1 && [ "$(gap_rows w6a)" = 0 ] && [[ $b6 == "stp x0, x1, [sp, #-0x20]!"* ]] && [[ $h6 == *"ldur x0, [sp, #0x18]" ]] && [ "$s6" = "below_sp=0" ]'
+ck "⑩ 安卓 N2：环内负偏移 -496 需 F=512 超上限 → rc=3、窗口记缺口、产物照出（v0.3.1 拿不准不停，rc=${r7}）" \
+   '[ "$r7" = 3 ] && [ "$(gap_rows n2a)" -ge 1 ] && grep -q "0x100" "$T/n2a/main.gaps.tsv" && [ -e "$T/n2a/main.fixups.tsv" ] && [ -e "$T/n2a/main.patched.bin" ]'
+exit $bad
+ "$T/$d/main.gaps.tsv" 2>/dev/null; then
+    echo "--- DIAG $d rc=$drc ---"
     cat "$T/$d.log"
     [ -f "$T/$d/main.fixups.tsv" ] && cat "$T/$d/main.fixups.tsv"
     [ -f "$T/$d/main.gaps.tsv" ] && cat "$T/$d/main.gaps.tsv"
