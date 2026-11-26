@@ -56,9 +56,28 @@ nso "$T/w6" '885f7c48,7100051f,f85f83f2,88087c5f,34000048,17fffffb,d65f03c0'   #
 nso "$T/n2" '885f7c48,7100051f,a9614ff2,88087c5f,34000048,17fffffb,d65f03c0'   # 环内 ldp x18,x19,[sp,#-0x1f0]
 rew() { local o=$1 f=$2; shift 2; mkdir -p "$T/$o"; env "$@" $PY "$H/tests/rewriter_exec.py" "$REW" "$T/$f" "$T/$o" main > "$T/$o.log" 2>&1; echo $?; }
 ra=$(rew w1a w1 S2A_TARGET=android); rg=$(rew w2a w2 S2A_TARGET=android); rn=$(rew w3a w3 S2A_TARGET=android)
+# Windows 诊断：绕过 Python exec 包装层，直接执行同一 C CLI，区分包装层与 CLI 的退出码。
+mkdir -p "$T/w2direct"
+env S2A_TARGET=android "$REW" "$T/w2" "$T/w2direct" main > "$T/w2direct.log" 2>&1
+rd=$?
+echo "DIAG W2 wrapper_rc=$rg direct_cli_rc=$rd"
+if [ "$rg" != 3 ] || [ "$rd" != 3 ]; then
+  echo "--- W2 wrapper log ---"; cat "$T/w2a.log"
+  echo "--- W2 direct CLI log ---"; cat "$T/w2direct.log"
+fi
 rp=$(rew p1a p1 S2A_TARGET=android); rx=$(rew n1a n1 S2A_TARGET=android); rp1=$(rew w1p w1 S2A_TARGET=apple)
 r4=$(rew w4a w4 S2A_TARGET=android); r5=$(rew w5a w5 S2A_TARGET=android); r6=$(rew w6a w6 S2A_TARGET=android)
 r7=$(rew n2a n2 S2A_TARGET=android)
+for d in n1a n2a; do
+  drc=$r7; [ "$d" = n1a ] && drc=$rx
+  gap_count=$(awk 'NF && $1 !~ /^#/ { n++ } END { print n+0 }' "$T/$d/main.gaps.tsv" 2>/dev/null || echo 0)
+  if [ "$drc" != 3 ] || [ "$gap_count" = 0 ]; then
+    echo "--- DIAG $d rc=$drc gaps=$gap_count ---"
+    cat "$T/$d.log"
+    [ -f "$T/$d/main.fixups.tsv" ] && cat "$T/$d/main.fixups.tsv"
+    [ -f "$T/$d/main.gaps.tsv" ] && cat "$T/$d/main.gaps.tsv"
+  fi
+done
 [ "$ra" = 0 ] || tail -8 "$T/w1a.log"; [ "$rg" = 0 ] && tail -8 "$T/w2a.log"
 # 逐条看补丁区：岛入口块、全补丁区 sp 下方访存计数、指定形态检索
 dis() { local d=$1; shift; $PY - "$T/$d" "$@" <<'EOF'

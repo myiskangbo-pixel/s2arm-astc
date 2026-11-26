@@ -5,14 +5,16 @@ import hashlib
 import json
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "pack/jobs"))
 
 import astc_job
 import ipa
 import onerom
-
-ROOT = Path(__file__).resolve().parents[3]
 
 
 class FakeContext:

@@ -67,21 +67,26 @@ class DependencyDiscovery(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("discovery fixture\n")
 
-    def test_explicit_then_checkout_then_shared(self):
-        for directory in (self.shared, self.checkout, self.explicit):
-            self.prepare(directory)
-            self.assertEqual(rewriter.dependency_dir(), directory.resolve())
+    def test_explicit_directory_is_used_when_complete(self):
+        self.prepare(self.explicit)
+        self.assertEqual(rewriter.dependency_dir(), self.explicit.resolve())
+
+    def test_checkout_is_used_without_environment_override(self):
+        self.prepare(self.checkout)
+        with mock.patch.dict(os.environ, S2A_REWRITER_DEPS=""):
+            self.assertEqual(rewriter.dependency_dir(), self.checkout.resolve())
 
     def test_shared_is_used_without_environment_override(self):
         self.prepare(self.shared)
         with mock.patch.dict(os.environ, S2A_REWRITER_DEPS=""):
             self.assertEqual(rewriter.dependency_dir(), self.shared.resolve())
 
-    def test_incomplete_candidate_does_not_hide_complete_shared_directory(self):
+    def test_incomplete_explicit_directory_does_not_fall_back(self):
         self.prepare(self.explicit)
         (self.explicit / "lz4-4.4.5/lz4libs/lz4.c").unlink()
         self.prepare(self.shared)
-        self.assertEqual(rewriter.dependency_dir(), self.shared.resolve())
+        with self.assertRaisesRegex(ValueError, "缺 C 改写器固定依赖"):
+            rewriter.dependency_dir()
 
     def test_all_candidates_missing_fail_without_creating_directories(self):
         with self.assertRaisesRegex(ValueError, "缺 C 改写器固定依赖"):
@@ -305,6 +310,7 @@ class PackagingRewrite(unittest.TestCase):
         self.assertTrue(version.stdout.startswith("s2a-rewrite capstone 5."), version.stdout)
         absent = dict(S2A_REWRITER_BUNDLED=str(binary), S2A_REWRITER_CACHE=str(self.directory / "no-cache"),
                       S2A_REWRITER_DEPS=str(self.directory / "absent"),
+                      S2A_RUN_ROOT=str(self.directory / "isolated-run"),
                       HOME=str(self.directory / "home"))   # 共享依赖回落也不在：指纹不符时只能报红
         self.assertEqual(self.key(**absent), "c:" + hashlib.sha256(binary.read_bytes()).hexdigest())
         self.assertNotIn("跳过", self.stage(**absent))
@@ -399,14 +405,22 @@ class PackagingRewrite(unittest.TestCase):
         (tree / "pack").mkdir()
         shutil.copy2(ROOT / "pack/rewriter.py", tree / "pack/rewriter.py")
         command = [sys.executable, str(tree / "pack/rewriter.py"), "c-path"]
-        first = subprocess.run(command, env=self.env, capture_output=True, text=True, check=True)
+        # The copied checkout intentionally contains only source files. Pin the
+        # already-prepared dependency tree from the real checkout explicitly;
+        # do not rely on HOME / S2A_RUN_ROOT inherited from the CI host.
+        dep_result = subprocess.run([sys.executable, str(ROOT / "pack/rewriter.py"), "deps-path"],
+                                    env=self.env, capture_output=True, text=True)
+        self.assertEqual(dep_result.returncode, 0, dep_result.stdout + dep_result.stderr)
+        env = dict(self.env, S2A_REWRITER_DEPS=dep_result.stdout.strip())
+        first = subprocess.run(command, env=env, capture_output=True, text=True)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual(first.stdout.strip(), str(self.binary))
         with (tree / "runtime/rewriter/main.c").open("ab") as out:
             out.write(b"\n/* changed source contents */\n")
         # The source changed while no Git commit or mtime contract was involved.
         # Rebuild from the changed bytes, even if a shared dependency fallback exists.
-        result = subprocess.run(command, env=self.env, capture_output=True, text=True,
-                                check=True, timeout=180)
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=180)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotEqual(result.stdout.strip(), str(self.binary))
         self.assertTrue(Path(result.stdout.strip()).is_file())
 

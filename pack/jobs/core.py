@@ -1223,12 +1223,14 @@ class Context:
             process.send_signal(getattr(signal, "SIG" + sig))
             return
         # Popen still owns this unreaped, live child, so its PID cannot have
-        # been reused. macOS may replace argv[0] (notably framework Python),
-        # and ps truncates long commands by default. Match the live leader's
-        # prefix, rather than guessing a basename from the original argv.
+        # been reused. macOS may canonicalize argv[0] differently between
+        # querying the child PID and its process-group leader (notably for the
+        # Python framework launcher). Match a stable command-line suffix so
+        # the executable-path spelling does not create a false rejection.
         command = subprocess.run(["/bin/ps", "-ww", "-o", "command=", "-p", str(process.pid)],
                                  capture_output=True, text=True, timeout=5, check=False)
-        marker = command.stdout.strip()[:64]
+        command_line = command.stdout.strip()
+        marker = command_line[-96:] if command_line else ""
         if not marker:
             if process.poll() is not None:
                 return

@@ -230,4 +230,7 @@ ROOT_REPLAY='degrade.rewrite.tsv *.code_patch.tsv *.patched.bin *.fixups.tsv *.g
 #   换了版本一眼看出。原生就 60 帧的款（0100152000022000）没有表、也不列
 FV=$(awk -F'\t' -v p="$PID" '!/^#/ && toupper($1) == p { print substr($2, 1, 16) }' "$R/docs/名单_60帧/"*.tsv 2> /dev/null | while read -r b; do [ -f "$R/runtime/fps/$b.tsv" ] && printf '%s ' "$b"; done)
 FS=$([ -n "${FT}" ] && echo "帧率表 ${BID:0:16}" || { [ -f "$W/fps.tsv" ] && echo "通用帧率表（UE4 控制台变量按名定位）"; } || echo "无帧率表${FV:+（本构建号 ${BID:0:16} 没有表，本款有表的构建号 ${FV% }）}")
-echo "🟢 $G 改写 $n 个模块（$((SECONDS - t0)) 秒；宽屏候选 $(grep -c . "$(root_cur "$G")/widen_sites.tsv") 行，启用表 $([ ${#EN[@]} -gt 0 ] && echo "$(for t in "${EN[@]}"; do t=${t##*/widen_enable.}; printf '%s ' "${t%.tsv}"; done)" || echo 无＝不加宽)；$([ -n "$VR" ] && echo 宽屏已验证 || echo 不在宽屏已验证名单)；${FS}；包内能力清单 $(awk -F'\t' '$1 == "widen" {w = $2} $1 == "fps60" {f = $2} END {printf "满屏 %s / 60 帧 %s", (w == 1 ? "开" : "关"), (f == 1 ? "开" : "关")}' "$(root_cur "$G")/s2a_caps.tsv")（实际开关以清单为准，原因见 s2a_caps.tsv）），现行 → $(basename "$(root_cur "$G")")"
+CAPS_FILE="$(root_cur "$G")/s2a_caps.tsv"
+CAPS_DESC="未生成（由能力清单阶段生成）"
+[ ! -f "$CAPS_FILE" ] || CAPS_DESC=$(awk -F'\t' '$1 == "widen" {w = $2} $1 == "fps60" {f = $2} END {printf "满屏 %s / 60 帧 %s", (w == 1 ? "开" : "关"), (f == 1 ? "开" : "关")}' "$CAPS_FILE")
+echo "🟢 $G 改写 $n 个模块（$((SECONDS - t0)) 秒；宽屏候选 $(grep -c . "$(root_cur "$G")/widen_sites.tsv") 行，启用表 $([ ${#EN[@]} -gt 0 ] && echo "$(for t in "${EN[@]}"; do t=${t##*/widen_enable.}; printf '%s ' "${t%.tsv}"; done)" || echo 无＝不加宽)；$([ -n "$VR" ] && echo 宽屏已验证 || echo 不在宽屏已验证名单)；${FS}；包内能力清单 ${CAPS_DESC}（实际开关以清单为准，原因见 s2a_caps.tsv）），现行 → $(basename "$(root_cur "$G")")"
