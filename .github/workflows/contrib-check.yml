@@ -91,6 +91,10 @@ jobs:
             -r launchers/macos/requirements-runtime.txt \
             ruff==0.17.1
           "$PY" runtime/rewriter/prepare_deps.py build/rewriter-deps
+          # Share the exact pinned source dependencies with the detached base
+          # worktree used for red-step comparison; never let it silently fall
+          # back to an unprepared per-worktree directory.
+          echo "S2A_REWRITER_DEPS=$GITHUB_WORKSPACE/build/rewriter-deps" >> "$GITHUB_ENV"
           # Full-tier contributor checks verify the pinned upstream Ryujinx
           # object; a full-history checkout of this fork does not contain it.
           bash compat/fetch_base.sh
