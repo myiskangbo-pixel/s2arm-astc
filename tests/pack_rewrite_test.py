@@ -305,6 +305,7 @@ class PackagingRewrite(unittest.TestCase):
         self.assertTrue(version.stdout.startswith("s2a-rewrite capstone 5."), version.stdout)
         absent = dict(S2A_REWRITER_BUNDLED=str(binary), S2A_REWRITER_CACHE=str(self.directory / "no-cache"),
                       S2A_REWRITER_DEPS=str(self.directory / "absent"),
+                      S2A_RUN_ROOT=str(self.directory / "isolated-run"),
                       HOME=str(self.directory / "home"))   # 共享依赖回落也不在：指纹不符时只能报红
         self.assertEqual(self.key(**absent), "c:" + hashlib.sha256(binary.read_bytes()).hexdigest())
         self.assertNotIn("跳过", self.stage(**absent))
