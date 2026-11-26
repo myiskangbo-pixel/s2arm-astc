@@ -115,6 +115,8 @@ jobs:
           dotnet restore tests/crosshost_stage/Producer.csproj \
             --configfile nuget.config -r osx-arm64 --disable-parallel -p:NuGetAudit=false
           brew list --versions spirv-tools >/dev/null 2>&1 || brew install spirv-tools
+          # runtime/gate.sh's native build graph uses ripgrep for source discovery.
+          brew list --versions ripgrep >/dev/null 2>&1 || brew install ripgrep
           vulkan_projects=(
             graphics/vulkan/cache/tests/renderer/RendererProfile.Tests.csproj
             graphics/vulkan/core/cache-tests/CacheAdmission.Tests.csproj
