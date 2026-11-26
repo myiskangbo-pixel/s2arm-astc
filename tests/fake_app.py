@@ -7,8 +7,21 @@
 #   gpuhang 第 41 帧写一行 GPU 卡死原文（FAKE_HANG_LINE 可换），之后照常出帧
 #   restart MARK 后 FAKE_RESTART_AFTER（缺省 3）帧做一次进程内重启：同真 App，帧号从 1 重数、frames.tsv 重写（只剩重启后这一段）、心跳帧号归零
 # FAKE_SHOT=<名>：MARK 时写 Documents/ap_<名>.png（自动玩家自存截图）
-import glob, json, os, signal, sys, tarfile, time
+import atexit, glob, json, os, signal, sys, tarfile, time
 D = os.environ['FAKE_DOCS']; sc = os.environ.get('FAKE_SCENE', 'ok'); signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+def _clear_fake_app_pid():
+    # Remove only our own PID record so an exited/zombie fake App is not
+    # mistaken for a live process by the simulated device process table.
+    device_root = os.path.dirname(os.path.dirname(os.path.dirname(D)))
+    pid_file = os.path.join(device_root, 'app.pid')
+    try:
+        if open(pid_file).read().strip() == str(os.getpid()):
+            os.remove(pid_file)
+    except OSError:
+        pass
+
+atexit.register(_clear_fake_app_pid)
 if os.environ.get('S2A_PACK_APPLY_ONLY') == '1':
     if os.environ.get('FAKE_APPLY') == 'crash': sys.exit(5)   # 起来即崩、没走到解包（10-22 链 SDK 27 没接 UIScene 的包）
     if os.environ.get('FAKE_APPLY') == 'slow': time.sleep(8)   # 解得慢但活着：不许被当成崩
