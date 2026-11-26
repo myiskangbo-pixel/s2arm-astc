@@ -14,6 +14,7 @@ on:
       - 'tools/toolchain*'
       - 'tests/astc_pack_test.py'
       - 'tests/rewriter_cmake_metadata_test.py'
+      - 'tests/rewriter_cmake_metadata_test.sh'
       - 'tests/rewrite_win_sp_test.sh'
       - 'tests/rewriter_exec.py'
       - 'tests/rewrite_c_api_test.py'
