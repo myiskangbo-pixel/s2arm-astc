@@ -116,7 +116,7 @@ D_ACT=$(tail -c +257 "$T/o7/nro1" 2>/dev/null | shasum -a 256 | awk '{print $1}'
 D_EXP=$(shasum -a 256 < "$T/D.nro" | awk '{print $1}')
 B_ACT=$(tail -c +257 "$T/o7/nro2" 2>/dev/null | shasum -a 256 | awk '{print $1}')
 B_EXP=$(shasum -a 256 < "$T/B.nro" | awk '{print $1}')
-O7_FILES=$(ls -A "$T/o7" | tr '\n' ' ')
+O7_FILES=$(LC_ALL=C ls -A "$T/o7" | tr '\n' ' ')
 ck "⑦ NSO 正文 = 原 NRO（D ${D_ACT}/${D_EXP}；B ${B_ACT}/${B_EXP}；文件：${O7_FILES}）" '[ "$D_ACT" = "$D_EXP" ] && [ "$B_ACT" = "$B_EXP" ] && [ "$O7_FILES" = "nro0 nro1 nro2 nro_modules.tsv " ]'
 python3 - "$H/runtime/rewriter" "$T/r7" "$T/o7b" > /dev/null 2>&1 <<'EOF'
 import sys; sys.path.insert(0, sys.argv[1]); import nro_to_nso as m
