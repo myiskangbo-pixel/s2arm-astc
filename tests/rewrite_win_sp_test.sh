@@ -70,7 +70,14 @@ r4=$(rew w4a w4 S2A_TARGET=android); r5=$(rew w5a w5 S2A_TARGET=android); r6=$(r
 r7=$(rew n2a n2 S2A_TARGET=android)
 for d in n1a n2a; do
   drc=$r7; [ "$d" = n1a ] && drc=$rx
-  if [ "$drc" != 3 ] || ! grep -qv '^#\\|^
+  gap_count=$(awk 'NF && $1 !~ /^#/ { n++ } END { print n+0 }' "$T/$d/main.gaps.tsv" 2>/dev/null || echo 0)
+  if [ "$drc" != 3 ] || [ "$gap_count" = 0 ]; then
+    echo "--- DIAG $d rc=$drc gaps=$gap_count ---"
+    cat "$T/$d.log"
+    [ -f "$T/$d/main.fixups.tsv" ] && cat "$T/$d/main.fixups.tsv"
+    [ -f "$T/$d/main.gaps.tsv" ] && cat "$T/$d/main.gaps.tsv"
+  fi
+done
 [ "$ra" = 0 ] || tail -8 "$T/w1a.log"; [ "$rg" = 0 ] && tail -8 "$T/w2a.log"
 # 逐条看补丁区：岛入口块、全补丁区 sp 下方访存计数、指定形态检索
 dis() { local d=$1; shift; $PY - "$T/$d" "$@" <<'EOF'
