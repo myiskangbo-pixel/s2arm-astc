@@ -150,7 +150,9 @@ def main():
             # The old ABI uses enabled defaults even when the process environment
             # disables cuts; the explicit options on the other thread stay off.
             source(source_path)
-            harness = native.with_name('s2a-rewrite-api-test')
+            harness = native.with_name('s2a-rewrite-api-test.exe' if os.name == 'nt' else 's2a-rewrite-api-test')
+            if not harness.is_file():
+                raise FileNotFoundError(f'C API harness not built beside REW: {harness}')
             env = dict(os.environ, S2A_SDK_ADDR_CUT='0')
             result = subprocess.run([str(harness), str(source_path), str(root / 'api-apple'), str(root / 'api-android'), 'sdk'], env=env, capture_output=True, text=True, timeout=60)
             assert result.returncode == 0 and not result.stderr, (result.stdout, result.stderr)
