@@ -281,10 +281,12 @@ N=${#STEPS[@]}
 if [ -n "${GATE_DIAG_DIR:-}" ]; then
   {
     printf 'index\tstep\tlimit\n'
-    for i in $(seq 1 $N); do
-      s=${STEPS[$((i - 1))]}; name=${s%%$'\t'*}; lim=${s##*$'\t'}
-      printf '%s\t%s\t%s\n' "$i" "$name" "$lim"
-    done
+    if [ "$N" -gt 0 ]; then
+      for i in $(seq 1 "$N"); do
+        s=${STEPS[$((i - 1))]}; name=${s%%$'\t'*}; lim=${s##*$'\t'}
+        printf '%s\t%s\t%s\n' "$i" "$name" "$lim"
+      done
+    fi
   } > "$L/steps.tsv"
 fi
 # 0 步（GATE_RERUN 只跑的步本树都不涉及，如列车逐支核里这支路由不到红步）：直接绿退出——下面的 $(seq 1 $N) 在 macOS 上 N=0 时打出「1 0」，会越界取 STEPS
