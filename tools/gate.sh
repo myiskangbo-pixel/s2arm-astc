@@ -267,7 +267,7 @@ N=${#STEPS[@]}
 # .rc means the exact step was running when the runner stopped it.
 if [ -n "${GATE_DIAG_DIR:-}" ]; then
   {
-    printf 'index\\tstep\\tlimit\\n'
+    printf 'index\tstep\tlimit\n'
     for i in $(seq 1 $N); do
       s=${STEPS[$((i - 1))]}; name=${s%%（GATE_RERUN 只跑的步本树都不涉及，如列车逐支核里这支路由不到红步）：直接绿退出——下面的 $(seq 1 $N) 在 macOS 上 N=0 时打出「1 0」，会越界取 STEPS
 # 待 Mac 证的步另起一行机读（tab 分隔），总结行写成「本机绿、待 Mac 证」——不许让读末行的人 / 脚本把它当成整份门禁绿
@@ -601,7 +601,7 @@ elif [ "$MACN" -gt 0 ]; then echo "门禁 $([ $red = 0 ] && echo 本机绿、待
 else echo "门禁 $([ $red = 0 ] && echo 绿 || echo 红)：$TIER 档，跑了 $ran 步 / 应跑 $N 步${RWARN}$where"; fi
 gl_end "$([ $red = 0 ] && echo 绿 || echo 红)"
 exit $red
-\\t'*}; lim=${s##*（GATE_RERUN 只跑的步本树都不涉及，如列车逐支核里这支路由不到红步）：直接绿退出——下面的 $(seq 1 $N) 在 macOS 上 N=0 时打出「1 0」，会越界取 STEPS
+\t'*}; lim=${s##*（GATE_RERUN 只跑的步本树都不涉及，如列车逐支核里这支路由不到红步）：直接绿退出——下面的 $(seq 1 $N) 在 macOS 上 N=0 时打出「1 0」，会越界取 STEPS
 # 待 Mac 证的步另起一行机读（tab 分隔），总结行写成「本机绿、待 Mac 证」——不许让读末行的人 / 脚本把它当成整份门禁绿
 macsum() { [ "$MACN" -gt 0 ] || return 0; printf '待Mac证'; printf '\t%s' "${MACS[@]}"; echo; }
 [ "$N" = 0 ] && { gl_end 绿; [ ${#OTHER[@]} -gt 0 ] && echo "另一层：${OTHER[*]}"; macsum; if [ "$MACN" -gt 0 ]; then echo "门禁 本机绿、待 Mac 证：$TIER 档，本机已证 0 步（本机能跑的步本树都不涉及）${MACL}"; else echo "门禁 绿：$TIER 档，跑了 0 步 / 应跑 0 步（要跑的步本树都不涉及）"; fi; exit 0; }
@@ -933,8 +933,8 @@ elif [ "$MACN" -gt 0 ]; then echo "门禁 $([ $red = 0 ] && echo 本机绿、待
 else echo "门禁 $([ $red = 0 ] && echo 绿 || echo 红)：$TIER 档，跑了 $ran 步 / 应跑 $N 步${RWARN}$where"; fi
 gl_end "$([ $red = 0 ] && echo 绿 || echo 红)"
 exit $red
-\\t'}
-      printf '%s\\t%s\\t%s\\n' "$i" "$name" "$lim"
+\t'}
+      printf '%s\t%s\t%s\n' "$i" "$name" "$lim"
     done
   } > "$L/steps.tsv"
 fi
