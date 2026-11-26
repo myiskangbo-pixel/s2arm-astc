@@ -169,13 +169,26 @@ jobs:
           '@ | Set-Content -Path $probe -Encoding ascii
           & $clangcl /nologo /std:c11 /c $probe "/Fo$probeObj"
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path $probeObj)) {
-            throw 'clang-cl cannot compile unsigned __int128 / max_align_t probe'
+            throw 'clang-cl cannot compile C11 unsigned __int128 / max_align_t probe'
+          }
+          $probeCpp = Join-Path $env:RUNNER_TEMP 's2a-rewriter-clang-probe.cpp'
+          $probeCppObj = Join-Path $env:RUNNER_TEMP 's2a-rewriter-clang-probe-cxx.obj'
+          @'
+          #include <stddef.h>
+          typedef unsigned __int128 Mask;
+          union Alloc { max_align_t alignment; Mask mask; };
+          int main() { return sizeof(Mask) == 16 && sizeof(Alloc) >= 16 ? 0 : 1; }
+          '@ | Set-Content -Path $probeCpp -Encoding ascii
+          & $clangcl /nologo /std:c++17 /c $probeCpp "/Fo$probeCppObj"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $probeCppObj)) {
+            throw 'clang-cl cannot compile the matching C++ frontend probe'
           }
 
           $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "S2A_CC=$clang" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "S2A_CXX=$clangxx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "S2A_REWRITER_CC=$clangcl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+"S2A_REWRITER_CXX=$clangcl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           & $clang --version
           & $clangxx --version
           & $clangcl --version
@@ -227,6 +240,7 @@ jobs:
           $cmakeArgs = @(
             '-S', 'runtime/rewriter', '-B', $apiBuild, '-G', 'Ninja',
             "-DCMAKE_C_COMPILER:FILEPATH=$env:S2A_REWRITER_CC",
+"            "-DCMAKE_CXX_COMPILER:FILEPATH=$env:S2A_REWRITER_CXX",
             "-DS2A_REWRITER_DEPS=$env:S2A_REWRITER_DEPS",
             '-DCMAKE_BUILD_TYPE=Release', '-DS2A_REWRITER_API_TEST=ON',
             '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
