@@ -7,6 +7,7 @@ on:
       - 'pack/shell/closure.py'
       - 'tests/shell_csiblings_test.sh'
       - 'tools/contrib_check.sh'
+      - 'tools/contrib_diag.py'
       - 'tools/doctor.sh'
       - 'tools/gate.sh'
       - 'tools/gate_plan.sh'
