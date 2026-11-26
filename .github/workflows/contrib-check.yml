@@ -5,6 +5,9 @@ on:
     paths:
       - 'pack/stage_inputs/shell.tsv'
       - 'pack/shell/closure.py'
+      - 'pack/rewriter.py'
+      - 'runtime/rewriter/**'
+      - 'tests/rewriter_cmake_metadata_test.py'
       - 'tests/shell_csiblings_test.sh'
       - 'tools/contrib_check.sh'
       - 'tools/contrib_diag.py'

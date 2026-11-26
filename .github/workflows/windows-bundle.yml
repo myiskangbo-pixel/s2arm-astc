@@ -13,6 +13,7 @@ on:
       - 'services/systemdata/**'
       - 'tools/toolchain*'
       - 'tests/astc_pack_test.py'
+      - 'tests/rewriter_cmake_metadata_test.py'
       - 'tests/dev_run_test.sh'
       - 'compat/tree/global.json'
 
@@ -210,33 +211,48 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $env:S2A_REWRITER_DEPS = Join-Path $env:GITHUB_WORKSPACE 'build\rewriter-deps'
-          $env:S2A_REWRITER_CC = Join-Path $env:ProgramFiles 'LLVM\bin\clang-cl.exe'
+          $prepareLogDir = Join-Path $env:GITHUB_WORKSPACE 'build/windows/prepare-logs'
+          New-Item -ItemType Directory -Force -Path $prepareLogDir | Out-Null
+          $env:S2A_REWRITER_DEPS = Join-Path $env:GITHUB_WORKSPACE 'build/rewriter-deps'
+          $env:S2A_REWRITER_CC = Join-Path $env:ProgramFiles 'LLVM/bin/clang-cl.exe'
+          $env:S2A_REWRITER_CXX = Join-Path $env:ProgramFiles 'LLVM/bin/clang-cl.exe'
 
-          # Exercise the production c_path() entry: it must configure Ninja
-          # with Clang, build the CLI, and pass the full byte-for-byte corpus.
-          $rewriter = (& python -X utf8 pack/rewriter.py c-path | Out-String).Trim()
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $rewriter)) {
-            throw 'Production C rewriter build did not produce s2a-rewrite.exe'
+          # Regression-test CMake's generated compiler metadata before running
+          # the production build path (compiler IDs are not CMakeCache entries).
+          $metadataLog = Join-Path $prepareLogDir 'rewriter-cmake-metadata-test.log'
+          python -X utf8 tests/rewriter_cmake_metadata_test.py 2>&1 | Tee-Object -FilePath $metadataLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # Exercise the production c_path() entry and preserve its complete
+          # CMake/compiler output as an artifact even when configuration fails.
+          $rewriterLog = Join-Path $prepareLogDir 'rewriter-c-path.log'
+          & python -X utf8 pack/rewriter.py c-path 2>&1 | Tee-Object -FilePath $rewriterLog
+          $rewriterExit = $LASTEXITCODE
+          if ($rewriterExit -ne 0) {
+            throw "Production C rewriter build failed (exit $rewriterExit); see $rewriterLog"
           }
-          $cygpath = Join-Path $env:ProgramFiles 'Git\usr\bin\cygpath.exe'
+          $rewriter = (Get-Content -Path $rewriterLog -Tail 1 | Out-String).Trim()
+          if (-not (Test-Path -LiteralPath $rewriter)) {
+            throw "Production C rewriter build did not produce s2a-rewrite.exe; see $rewriterLog"
+          }
+          $cygpath = Join-Path $env:ProgramFiles 'Git/usr/bin/cygpath.exe'
           if (-not (Test-Path $cygpath)) { throw 'Git for Windows cygpath.exe missing' }
           $rewriterPosix = (& $cygpath -u $rewriter | Out-String).Trim()
           $env:S2A_PY = 'python'
           $env:REW = $rewriterPosix
           # These Windows-safe fixtures synthesize NSOs directly; the full
           # xcrun/otool golden corpus remains on the macOS contributor runner.
-          bash tests/rewrite_target_test.sh
+          bash tests/rewrite_target_test.sh 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-target.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          bash tests/rewrite_win_sp_test.sh
+          bash tests/rewrite_win_sp_test.sh 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-win-sp.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:REW = $rewriter
-          python -X utf8 tests/rewrite_sdk_c_test.py
+          python -X utf8 tests/rewrite_sdk_c_test.py 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-sdk-c.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           # Build the public C API concurrency harness with the same compiler
           # and CRT, then compare both threaded outputs to the checked-in goldens.
-          $apiBuild = Join-Path $env:GITHUB_WORKSPACE 'build\rewriter-api'
+          $apiBuild = Join-Path $env:GITHUB_WORKSPACE 'build/rewriter-api'
           $cmakeArgs = @(
             '-S', 'runtime/rewriter', '-B', $apiBuild, '-G', 'Ninja',
             "-DCMAKE_C_COMPILER:FILEPATH=$env:S2A_REWRITER_CC",
@@ -246,12 +262,12 @@ jobs:
             '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
             '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW'
           )
-          & cmake @cmakeArgs
+          & cmake @cmakeArgs 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewriter-api-configure.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & cmake --build $apiBuild --target s2a-rewrite s2a-rewrite-api-test --parallel 2
+          & cmake --build $apiBuild --target s2a-rewrite s2a-rewrite-api-test --parallel 2 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewriter-api-build.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:REW = Join-Path $apiBuild 's2a-rewrite.exe'
-          python -X utf8 tests/rewrite_c_api_test.py
+          python -X utf8 tests/rewrite_c_api_test.py 2>&1 | Tee-Object -FilePath (Join-Path $prepareLogDir 'rewrite-c-api.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Download and verify Zstandard runtime
