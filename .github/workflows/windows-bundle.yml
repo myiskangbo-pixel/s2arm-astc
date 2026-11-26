@@ -188,7 +188,7 @@ jobs:
           "S2A_CC=$clang" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "S2A_CXX=$clangxx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "S2A_REWRITER_CC=$clangcl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-"S2A_REWRITER_CXX=$clangcl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "S2A_REWRITER_CXX=$clangcl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           & $clang --version
           & $clangxx --version
           & $clangcl --version
@@ -240,7 +240,7 @@ jobs:
           $cmakeArgs = @(
             '-S', 'runtime/rewriter', '-B', $apiBuild, '-G', 'Ninja',
             "-DCMAKE_C_COMPILER:FILEPATH=$env:S2A_REWRITER_CC",
-"            "-DCMAKE_CXX_COMPILER:FILEPATH=$env:S2A_REWRITER_CXX",
+            "-DCMAKE_CXX_COMPILER:FILEPATH=$env:S2A_REWRITER_CXX",
             "-DS2A_REWRITER_DEPS=$env:S2A_REWRITER_DEPS",
             '-DCMAKE_BUILD_TYPE=Release', '-DS2A_REWRITER_API_TEST=ON',
             '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
