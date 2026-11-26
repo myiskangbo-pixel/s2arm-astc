@@ -83,6 +83,9 @@ jobs:
     needs: apple-inputs
     runs-on: windows-2025
     timeout-minutes: 180
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
     steps:
       - name: Checkout full source and tags
         uses: actions/checkout@v4
