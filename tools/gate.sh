@@ -83,6 +83,19 @@ if [ -n "$PLANM" ]; then L=$R/${GATE_OUT:?远端计划要给 GATE_OUT}; rm -rf "
 else L=$(mktemp -d); fi
 gate_cleanup() {
   if [ -n "${HB:-}" ]; then pkill -P "$HB" 2> /dev/null; kill "$HB" 2> /dev/null; fi
+  # A TERM handler has already stopped active timeout process groups. Give
+  # their wrappers a few seconds to flush the final diagnostic lines.
+  if [ -z "$PLANM" ]; then
+    for _ in 1 2 3 4 5; do
+      active=0
+      for f in "$L"/*.tp; do
+        [ -f "$f" ] || continue
+        p=$(cat "$f" 2> /dev/null); [ -n "$p" ] && kill -0 "$p" 2> /dev/null && active=1
+      done
+      [ "$active" = 0 ] && break
+      sleep 1
+    done
+  fi
   # CI may be cancelled while one gate step is still running. Preserve the
   # per-step logs and process markers before removing the private temp tree.
   if [ -z "$PLANM" ] && [ -n "${GATE_DIAG_DIR:-}" ] && [ -d "$L" ]; then
