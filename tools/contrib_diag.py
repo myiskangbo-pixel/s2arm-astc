@@ -42,7 +42,7 @@ def main() -> int:
         wait = wait_file.read_text(encoding="utf-8", errors="replace").strip() if wait_file.is_file() else "-"
         rows.append((index, name, limit, status, wait, log_file))
 
-    pending = [row for row in rows if not row[3].startswith("completed") ]
+    pending = [row for row in rows if not row[3].startswith("completed")]
     lines = [
         "# Contributor self-check diagnostics",
         "",
