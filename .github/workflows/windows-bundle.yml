@@ -207,7 +207,13 @@ jobs:
             throw 'Production C rewriter build did not produce s2a-rewrite.exe'
           }
           $env:REW = $rewriter
-          python -X utf8 tests/rewrite_c_test.py
+          # These Windows-safe fixtures synthesize NSOs directly; the full
+          # xcrun/otool golden corpus remains on the macOS contributor runner.
+          bash tests/rewrite_target_test.sh
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bash tests/rewrite_win_sp_test.sh
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -X utf8 tests/rewrite_sdk_c_test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           # Build the public C API concurrency harness with the same compiler
