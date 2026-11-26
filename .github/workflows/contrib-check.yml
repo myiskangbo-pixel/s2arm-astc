@@ -6,6 +6,19 @@ on:
       - 'pack/stage_inputs/shell.tsv'
       - 'pack/shell/closure.py'
       - 'pack/rewriter.py'
+      - 'pack/jobs/**'
+      - 'launchers/macos/prepare_build.py'
+      - 'launchers/shared/experience.v1.json'
+      - 'tools/rewriter-requirements.txt'
+      - 'tests/cpatch_twopath_test.sh'
+      - 'tests/pack_jobs_test.sh'
+      - 'tests/pack_rewrite_test.py'
+      - 'tests/nro_to_nso_test.sh'
+      - 'tests/jobs_l10n_lint_test.sh'
+      - 'tests/test_wired_test.sh'
+      - 'tests/rewriter_cmake_metadata_test.sh'
+      - 'tests/crosshost_stage_test.py'
+      - 'tests/crosshost_stage/Producer.csproj'
       - 'runtime/rewriter/**'
       - 'tests/rewriter_cmake_metadata_test.py'
       - 'tests/shell_csiblings_test.sh'
@@ -61,6 +74,16 @@ jobs:
           set -euo pipefail
           brew list --versions bash >/dev/null 2>&1 || brew install bash
           echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
+
+      - name: Prime offline NuGet cache for crosshost producer test
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The test itself restores from an empty local feed; prefetch the pinned
+          # package here so the integration remains offline and deterministic.
+          dotnet restore tests/crosshost_stage/Producer.csproj \
+            --source https://api.nuget.org/v3/index.json \
+            --disable-parallel -p:NuGetAudit=false
 
       - name: Prepare pinned Python and rewriter dependencies
         shell: bash
