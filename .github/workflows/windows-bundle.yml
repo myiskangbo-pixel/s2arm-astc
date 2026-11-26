@@ -206,13 +206,18 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path $rewriter)) {
             throw 'Production C rewriter build did not produce s2a-rewrite.exe'
           }
-          $env:REW = $rewriter
+          $cygpath = Join-Path $env:ProgramFiles 'Git\usr\bin\cygpath.exe'
+          if (-not (Test-Path $cygpath)) { throw 'Git for Windows cygpath.exe missing' }
+          $rewriterPosix = (& $cygpath -u $rewriter | Out-String).Trim()
+          $env:S2A_PY = 'python'
+          $env:REW = $rewriterPosix
           # These Windows-safe fixtures synthesize NSOs directly; the full
           # xcrun/otool golden corpus remains on the macOS contributor runner.
           bash tests/rewrite_target_test.sh
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           bash tests/rewrite_win_sp_test.sh
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:REW = $rewriter
           python -X utf8 tests/rewrite_sdk_c_test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
