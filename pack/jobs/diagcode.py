@@ -19,6 +19,7 @@ import re
 import sys
 import time
 import zlib
+from pathlib import Path
 
 from core import Failure, atomic, read, trace
 
@@ -75,7 +76,8 @@ def parse(code):
 
 
 def _path(c):
-    return c.private / "diagcode.json"
+    # Contexts from the job runner use Path, while lightweight test / API contexts may use str.
+    return Path(c.private) / "diagcode.json"
 
 
 def pending(c, gid):
