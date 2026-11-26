@@ -33,7 +33,7 @@ REQS = ["tools/rewriter-requirements.txt", "pack/fonts/requirements.txt", "launc
 FORMULAS = {"python@3.12": "构建 venv",
             "bash": "运行环境（bash 5）", "cmake": "C 改写器"}
 DAV1D_FORMULAS = {"meson": "dav1d 静态库（AV1 软解兜底）", "ninja": "dav1d 静态库（AV1 软解兜底）"}
-IMPORTS = "import capstone, lz4, numpy, PIL, fontTools, pathops"
+IMPORTS = "import capstone, lz4, unicorn, numpy, PIL, fontTools, pathops"
 GMAKE_VERSION = "4.4.1"
 GMAKE_URL = f"https://ftp.gnu.org/gnu/make/make-{GMAKE_VERSION}.tar.gz"
 GMAKE_SHA256 = "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"
